@@ -1,0 +1,352 @@
+import ftplib
+import ssl
+import os
+import pandas as pd
+from datetime import timedelta
+import sys
+import sqlite3
+import glob
+import re
+import warnings
+
+# Silenciar advertencias de Excel
+warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+
+# --- CONFIGURACIÓN DE RUTAS ---
+if getattr(sys, 'frozen', False):
+    app_path = os.path.dirname(sys.executable)
+else:
+    app_path = os.path.dirname(os.path.abspath(__file__))
+
+NOMBRE_ARCHIVO = "DescargasXM.xlsm" 
+ARCHIVO_EXCEL = os.path.join(app_path, NOMBRE_ARCHIVO)
+HOJA_NOMBRE = "Hoja1"
+NOMBRE_DB = os.path.join(app_path, "BaseDatosXM.db")
+
+# Archivos que solo tienen sufijo de MES (sin día)
+ARCHIVOS_MENSUALES = ['PEI', 'PME140', 'tserv','afac']
+
+# ==========================================
+#  UTILIDADES DE FECHAS
+# ==========================================
+
+def generar_fechas_permitidas(fecha_ini, fecha_fin):
+    dias_validos = set()
+    meses_validos = set()
+    delta = fecha_fin - fecha_ini
+    for i in range(delta.days + 1):
+        dia = fecha_ini + timedelta(days=i)
+        dias_validos.add(dia.strftime("%m%d"))
+        meses_validos.add(dia.strftime("%Y-%m"))
+    return dias_validos, meses_validos
+
+# ==========================================
+#  MÓDULO 1: DESCARGA FTP (CORREGIDO PARA EVITAR ARCHIVOS 0KB)
+# ==========================================
+
+def conectar_ftps(usuario, password):
+    context = ssl.create_default_context()
+    context.set_ciphers('DEFAULT:@SECLEVEL=1') 
+    ftps = ftplib.FTP_TLS(context=context)
+    print(f"🔌 Conectando a XM...")
+    try:
+        ftps.connect('xmftps.xm.com.co', 210)
+        ftps.login(usuario, password)
+        ftps.prot_p()
+        print("✅ ¡Conexión FTP Exitosa!")
+    except Exception as e:
+        raise Exception(f"Fallo conexión FTP: {e}")
+    return ftps
+
+def proceso_descarga(df_config):
+    print("\n--- INICIANDO FASE 1: DESCARGA DE ARCHIVOS ---")
+    
+    usuario = df_config.iloc[1, 0] 
+    password = df_config.iloc[1, 1] 
+    ruta_local_base = df_config.iloc[1, 3] 
+    fecha_ini = df_config.iloc[1, 4] 
+    fecha_fin = df_config.iloc[1, 5] 
+    
+    lista_archivos = df_config.iloc[5:, [0, 1]].dropna() 
+    lista_archivos.columns = ['NombreBase', 'RutaRemota']
+
+    dias_permitidos, meses_permitidos = generar_fechas_permitidas(fecha_ini, fecha_fin)
+
+    try:
+        ftps = conectar_ftps(usuario, password)
+    except Exception as e:
+        print(f"❌ No se pudo conectar: {e}")
+        return
+
+    for anio_mes in sorted(list(meses_permitidos)):
+        print(f"\n📂 Verificando carpeta remota: {anio_mes}")
+        mes_actual_str = anio_mes.split("-")[1] 
+        
+        ruta_local_mes = os.path.join(ruta_local_base, anio_mes)
+        if not os.path.exists(ruta_local_mes):
+            os.makedirs(ruta_local_mes)
+
+        grupos = lista_archivos.groupby('RutaRemota')
+
+        for ruta_remota_base, grupo in grupos:
+            ruta_remota_base = str(ruta_remota_base).strip()
+            
+            if ruta_remota_base.endswith("/"):
+                ruta_remota_final = f"{ruta_remota_base}{anio_mes}"
+            elif ruta_remota_base.endswith(anio_mes):
+                ruta_remota_final = ruta_remota_base
+            else:
+                ruta_remota_final = f"{ruta_remota_base}/{anio_mes}"
+
+            try:
+                ftps.cwd(ruta_remota_final)
+                archivos_en_servidor = ftps.nlst()
+            except:
+                print(f"   ⚠️ Carpeta no accesible: {ruta_remota_final}")
+                continue
+
+            for _, row in grupo.iterrows():
+                nombre_base = str(row['NombreBase']).strip()
+                nombre_base_lower = nombre_base.lower()
+                
+                es_mensual = False
+                for especial in ARCHIVOS_MENSUALES:
+                    if nombre_base_lower == especial.lower():
+                        es_mensual = True
+                        break
+                
+                coincidencias = []
+                
+                if es_mensual:
+                    patron_esperado = f"{nombre_base}{mes_actual_str}".lower()
+                    for f in archivos_en_servidor:
+                        if os.path.basename(f).lower().startswith(patron_esperado):
+                            coincidencias.append(f)
+                else:
+                    for f in archivos_en_servidor:
+                        nombre_archivo = os.path.basename(f).lower()
+                        if not nombre_archivo.startswith(nombre_base_lower):
+                            continue
+                        for dia in dias_permitidos:
+                            if dia in nombre_archivo:
+                                coincidencias.append(f)
+                                break 
+
+                for archivo in coincidencias:
+                    nombre_limpio = os.path.basename(archivo)
+                    ruta_destino = os.path.join(ruta_local_mes, nombre_limpio)
+
+                    # Si ya existe y tiene datos (>0 bytes), lo saltamos
+                    if os.path.exists(ruta_destino) and os.path.getsize(ruta_destino) > 0:
+                        continue 
+                    
+                    print(f"   ⬇️ Descargando: {nombre_limpio}")
+                    try:
+                        with open(ruta_destino, "wb") as local_file:
+                            ftps.retrbinary(f"RETR {archivo}", local_file.write)
+                        
+                        # VERIFICACIÓN DE INTEGRIDAD
+                        if os.path.getsize(ruta_destino) == 0:
+                            print(f"      ⚠️ Descarga fallida (0 bytes). Borrando...")
+                            os.remove(ruta_destino)
+                            
+                    except Exception as e:
+                        print(f"      ❌ Error descarga: {e}")
+                        # Si falló y dejó un archivo corrupto, borrarlo
+                        if os.path.exists(ruta_destino):
+                            os.remove(ruta_destino)
+
+    try:
+        ftps.quit()
+    except:
+        pass
+    print(f"✅ FASE 1 TERMINADA.")
+
+
+# ==========================================
+#  MÓDULO 2: BASE DE DATOS (OPTIMIZADO "TURBO")
+# ==========================================
+
+def extraer_info_nombre(nombre_archivo):
+    nombre_base, extension = os.path.splitext(nombre_archivo)
+    extension = extension.replace(".", "")
+    
+    for especial in ARCHIVOS_MENSUALES:
+        if nombre_base.upper().startswith(especial.upper()):
+            nombre_tabla = especial
+            fecha_resto = nombre_base[len(especial):] 
+            return nombre_tabla, fecha_resto, extension
+
+    match = re.search(r"\d", nombre_base)
+    if match:
+        nombre_tabla = nombre_base[:match.start()]
+        fecha_mmdd = nombre_base[match.start():]
+    else:
+        nombre_tabla = nombre_base
+        fecha_mmdd = "0000"
+        
+    return nombre_tabla, fecha_mmdd, extension
+
+def obtener_anio_de_carpeta(ruta_completa):
+    try:
+        carpeta_padre = os.path.basename(os.path.dirname(ruta_completa))
+        if "-" in carpeta_padre: return carpeta_padre.split("-")[0]
+        return carpeta_padre
+    except: return "0000"
+
+def cargar_cache_archivos_existentes(cursor):
+    """
+    Carga en memoria TODOS los nombres de archivos que ya existen en la BD.
+    Retorna un SET (conjunto) que permite búsquedas instantáneas.
+    """
+    print("   🧠 Cargando memoria de archivos procesados...")
+    cache = set()
+    try:
+        # 1. Obtener todas las tablas
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tablas = cursor.fetchall()
+        
+        for (tabla,) in tablas:
+            try:
+                # Verificamos si la tabla tiene la columna origen_archivo
+                cursor.execute(f"PRAGMA table_info({tabla})")
+                cols = [info[1] for info in cursor.fetchall()]
+                
+                if 'origen_archivo' in cols:
+                    cursor.execute(f"SELECT DISTINCT origen_archivo FROM {tabla}")
+                    archivos = cursor.fetchall()
+                    for (archivo,) in archivos:
+                        if archivo: # Evitar nulos
+                            cache.add(archivo)
+            except:
+                pass
+    except Exception as e:
+        print(f"   ⚠️ Error cargando caché: {e}")
+    
+    print(f"   🧠 Memoria lista: {len(cache)} archivos ya conocidos.")
+    return cache
+
+def proceso_base_datos(df_config):
+    print("\n--- INICIANDO FASE 2: ACTUALIZACIÓN DE BASE DE DATOS (MODO TURBO) ---")
+    
+    ruta_descargas = df_config.iloc[1, 3] 
+    fecha_ini = df_config.iloc[1, 4] 
+    fecha_fin = df_config.iloc[1, 5] 
+    
+    dias_permitidos, meses_permitidos = generar_fechas_permitidas(fecha_ini, fecha_fin)
+    
+    print(f"🔌 Conectando a BD: {NOMBRE_DB}")
+    conn = sqlite3.connect(NOMBRE_DB)
+    cursor = conn.cursor()
+    
+    # --- OPTIMIZACIÓN 1: CARGA PREVIA ---
+    archivos_procesados_cache = cargar_cache_archivos_existentes(cursor)
+    
+    print(f"📂 Escaneando archivos locales...")
+    # --- OPTIMIZACIÓN 2: GLOB MENOS AGRESIVO (Opcional, pero ayuda) ---
+    # En lugar de escanear TODO, intentamos limitar si es posible, 
+    # pero mantendremos el glob recursivo por si las carpetas varían mucho.
+    patron = os.path.join(ruta_descargas, "**", "*.tx*")
+    archivos = glob.glob(patron, recursive=True)
+    
+    print(f"   🔍 Se encontraron {len(archivos)} archivos en disco. Filtrando...")
+
+    guardados = 0
+    omitidos = 0
+    ignorados = 0
+    vacios = 0
+    
+    # Preparamos transacción para que sea más rápido insertar en bloque
+    # (SQLite es más rápido si haces commit al final o cada X registros)
+    
+    for ruta_completa in archivos:
+        nombre_archivo = os.path.basename(ruta_completa)
+        
+        # 1. Chequeo Rápido de Caché (Evita SQL)
+        if nombre_archivo in archivos_procesados_cache:
+            omitidos += 1
+            continue
+
+        # 2. Chequeo de tamaño
+        if os.path.getsize(ruta_completa) == 0:
+            vacios += 1
+            continue
+            
+        nombre_tabla, fecha_identificador, version = extraer_info_nombre(nombre_archivo)
+        anio_carpeta = obtener_anio_de_carpeta(ruta_completa)
+        
+        # 3. Filtro Fechas
+        es_valido = False
+        if nombre_tabla in ARCHIVOS_MENSUALES:
+            clave_mes = f"{anio_carpeta}-{fecha_identificador}" 
+            if clave_mes in meses_permitidos:
+                es_valido = True
+        else:
+            if fecha_identificador in dias_permitidos:
+                es_valido = True
+
+        if not es_valido:
+            ignorados += 1
+            continue
+
+        # SI LLEGAMOS AQUI, ES UN ARCHIVO NUEVO Y VÁLIDO
+        try:
+            try:
+                df = pd.read_csv(ruta_completa, sep=';', decimal='.', encoding='latin-1', on_bad_lines='skip', engine='python')
+            except pd.errors.EmptyDataError:
+                vacios += 1
+                continue
+            
+            if df.empty:
+                vacios += 1
+                continue
+
+            df.columns = df.columns.str.strip().str.replace(' ', '_').str.lower()
+            df['origen_archivo'] = nombre_archivo
+            df['anio'] = anio_carpeta
+            df['mes_dia'] = fecha_identificador
+            df['version_dato'] = version
+            df['fecha_carga'] = pd.Timestamp.now()
+            
+            df.to_sql(nombre_tabla, conn, if_exists='append', index=False)
+            
+            # Actualizamos la caché local para no reintentarlo si hubiera duplicados en la misma corrida
+            archivos_procesados_cache.add(nombre_archivo) 
+            
+            print(f"   💾 Guardado: {nombre_archivo}")
+            guardados += 1
+            
+        except Exception as e:
+            print(f"   ⚠️ Error crítico leyendo {nombre_archivo}: {e}")
+
+    conn.close()
+    print(f"✅ FASE 2 TERMINADA.")
+    print(f"   📥 Insertados: {guardados}")
+    print(f"   ⏭️ Omitidos (Ya en BD): {omitidos}")
+    print(f"   🚫 Ignorados (Fuera de rango): {ignorados}")
+    print(f"   🗑️ Vacíos/Corruptos: {vacios}")
+
+def main():
+    print(f"🚀 INICIANDO SISTEMA XM (Final con corrección de archivos vacíos)")
+    try:
+        df_config = pd.read_excel(ARCHIVO_EXCEL, sheet_name=HOJA_NOMBRE, header=None, engine='openpyxl')
+    except Exception as e:
+        print(f"❌ Error crítico leyendo Excel: {e}")
+        input("Enter para salir...")
+        return
+
+    try:
+        proceso_descarga(df_config)
+    except Exception as e:
+        print(f"❌ Error en Descarga: {e}")
+
+    try:
+        proceso_base_datos(df_config)
+    except Exception as e:
+        print(f"❌ Error en Base de Datos: {e}")
+
+    print("\n🏁 PROCESO FINALIZADO.")
+    input("Presiona Enter para cerrar...")
+
+if __name__ == "__main__":
+    main()

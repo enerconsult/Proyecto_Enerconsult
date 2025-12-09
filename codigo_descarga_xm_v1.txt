@@ -1,0 +1,314 @@
+import ftplib
+import ssl
+import os
+import pandas as pd
+from datetime import timedelta
+import sys
+import sqlite3
+import glob
+import re
+import warnings
+
+# Silenciar advertencias
+warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+
+# --- CONFIGURACIÓN DE RUTAS ---
+if getattr(sys, 'frozen', False):
+    app_path = os.path.dirname(sys.executable)
+else:
+    app_path = os.path.dirname(os.path.abspath(__file__))
+
+NOMBRE_ARCHIVO = "DescargasXM.xlsm" 
+ARCHIVO_EXCEL = os.path.join(app_path, NOMBRE_ARCHIVO)
+HOJA_NOMBRE = "Hoja1"
+NOMBRE_DB = os.path.join(app_path, "BaseDatosXM.db")
+
+# Archivos que solo tienen sufijo de MES (sin día)
+ARCHIVOS_MENSUALES = ['PEI', 'PME140', 'tserv','afac']
+
+# ==========================================
+#  UTILIDADES DE FECHAS
+# ==========================================
+
+def generar_fechas_permitidas(fecha_ini, fecha_fin):
+    """
+    Genera dos conjuntos de control:
+    1. dias_validos: Set de 'MMDD' (ej: {'1001', '1002'}) para archivos diarios.
+    2. meses_validos: Set de 'YYYY-MM' (ej: {'2025-10'}) para archivos mensuales.
+    """
+    dias_validos = set()
+    meses_validos = set()
+    delta = fecha_fin - fecha_ini
+    for i in range(delta.days + 1):
+        dia = fecha_ini + timedelta(days=i)
+        dias_validos.add(dia.strftime("%m%d"))
+        meses_validos.add(dia.strftime("%Y-%m"))
+    return dias_validos, meses_validos
+
+# ==========================================
+#  MÓDULO 1: DESCARGA FTP (Lógica Híbrida)
+# ==========================================
+
+def conectar_ftps(usuario, password):
+    context = ssl.create_default_context()
+    context.set_ciphers('DEFAULT:@SECLEVEL=1') 
+    ftps = ftplib.FTP_TLS(context=context)
+    print(f"🔌 Conectando a XM...")
+    try:
+        ftps.connect('xmftps.xm.com.co', 210)
+        ftps.login(usuario, password)
+        ftps.prot_p()
+        print("✅ ¡Conexión FTP Exitosa!")
+    except Exception as e:
+        raise Exception(f"Fallo conexión FTP: {e}")
+    return ftps
+
+def proceso_descarga(df_config):
+    print("\n--- INICIANDO FASE 1: DESCARGA DE ARCHIVOS ---")
+    
+    usuario = df_config.iloc[1, 0] 
+    password = df_config.iloc[1, 1] 
+    ruta_local_base = df_config.iloc[1, 3] 
+    fecha_ini = df_config.iloc[1, 4] 
+    fecha_fin = df_config.iloc[1, 5] 
+    
+    lista_archivos = df_config.iloc[5:, [0, 1]].dropna() 
+    lista_archivos.columns = ['NombreBase', 'RutaRemota']
+
+    # Generamos listas de control para filtrar lo que se descarga
+    dias_permitidos, meses_permitidos = generar_fechas_permitidas(fecha_ini, fecha_fin)
+
+    try:
+        ftps = conectar_ftps(usuario, password)
+    except Exception as e:
+        print(f"❌ No se pudo conectar: {e}")
+        return
+
+    # Iterar solo sobre los meses involucrados en el rango
+    for anio_mes in sorted(list(meses_permitidos)):
+        print(f"\n📂 Verificando carpeta remota: {anio_mes}")
+        mes_actual_str = anio_mes.split("-")[1] # "10"
+        
+        ruta_local_mes = os.path.join(ruta_local_base, anio_mes)
+        if not os.path.exists(ruta_local_mes):
+            os.makedirs(ruta_local_mes)
+
+        grupos = lista_archivos.groupby('RutaRemota')
+
+        for ruta_remota_base, grupo in grupos:
+            ruta_remota_base = str(ruta_remota_base).strip()
+            
+            # Construir ruta remota
+            if ruta_remota_base.endswith("/"):
+                ruta_remota_final = f"{ruta_remota_base}{anio_mes}"
+            elif ruta_remota_base.endswith(anio_mes):
+                ruta_remota_final = ruta_remota_base
+            else:
+                ruta_remota_final = f"{ruta_remota_base}/{anio_mes}"
+
+            try:
+                ftps.cwd(ruta_remota_final)
+                archivos_en_servidor = ftps.nlst()
+            except:
+                print(f"   ⚠️ Carpeta no accesible: {ruta_remota_final}")
+                continue
+
+            for _, row in grupo.iterrows():
+                nombre_base = str(row['NombreBase']).strip()
+                nombre_base_lower = nombre_base.lower()
+                
+                # --- IDENTIFICAR TIPO DE ARCHIVO ---
+                es_mensual = False
+                for especial in ARCHIVOS_MENSUALES:
+                    if nombre_base_lower == especial.lower():
+                        es_mensual = True
+                        break
+                
+                coincidencias = []
+                
+                if es_mensual:
+                    # CASO MENSUAL: Buscar nombre + mes (ej: PEI10)
+                    patron_esperado = f"{nombre_base}{mes_actual_str}".lower()
+                    for f in archivos_en_servidor:
+                        if os.path.basename(f).lower().startswith(patron_esperado):
+                            coincidencias.append(f)
+                else:
+                    # CASO DIARIO: Buscar nombre + alguno de los días permitidos
+                    for f in archivos_en_servidor:
+                        nombre_archivo = os.path.basename(f).lower()
+                        if not nombre_archivo.startswith(nombre_base_lower):
+                            continue
+                        
+                        # Filtro estricto de días
+                        for dia in dias_permitidos:
+                            if dia in nombre_archivo:
+                                coincidencias.append(f)
+                                break 
+
+                for archivo in coincidencias:
+                    nombre_limpio = os.path.basename(archivo)
+                    ruta_destino = os.path.join(ruta_local_mes, nombre_limpio)
+
+                    if os.path.exists(ruta_destino):
+                        continue 
+                    
+                    print(f"   ⬇️ Descargando: {nombre_limpio}")
+                    try:
+                        with open(ruta_destino, "wb") as local_file:
+                            ftps.retrbinary(f"RETR {archivo}", local_file.write)
+                    except Exception as e:
+                        print(f"      ❌ Error descarga: {e}")
+
+    try:
+        ftps.quit()
+    except:
+        pass
+    print(f"✅ FASE 1 TERMINADA.")
+
+
+# ==========================================
+#  MÓDULO 2: BASE DE DATOS (Filtro Corregido)
+# ==========================================
+
+def extraer_info_nombre(nombre_archivo):
+    """
+    Extrae info manejando archivos mensuales y diarios.
+    Retorna: (nombre_tabla, fecha_identificador, extension)
+    """
+    nombre_base, extension = os.path.splitext(nombre_archivo)
+    extension = extension.replace(".", "")
+    
+    # 1. Revisar si es mensual
+    for especial in ARCHIVOS_MENSUALES:
+        if nombre_base.upper().startswith(especial.upper()):
+            nombre_tabla = especial
+            # En mensuales, la "fecha" es solo el mes (ej: 11)
+            fecha_resto = nombre_base[len(especial):] 
+            return nombre_tabla, fecha_resto, extension
+
+    # 2. Archivo diario normal
+    match = re.search(r"\d", nombre_base)
+    if match:
+        nombre_tabla = nombre_base[:match.start()]
+        fecha_mmdd = nombre_base[match.start():]
+    else:
+        nombre_tabla = nombre_base
+        fecha_mmdd = "0000"
+        
+    return nombre_tabla, fecha_mmdd, extension
+
+def obtener_anio_de_carpeta(ruta_completa):
+    try:
+        carpeta_padre = os.path.basename(os.path.dirname(ruta_completa))
+        if "-" in carpeta_padre: return carpeta_padre.split("-")[0]
+        return carpeta_padre
+    except: return "0000"
+
+def archivo_ya_procesado(cursor, tabla, nombre_archivo):
+    try:
+        cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{tabla}'")
+        if cursor.fetchone() is None: return False
+        cursor.execute(f"SELECT 1 FROM {tabla} WHERE origen_archivo = ? LIMIT 1", (nombre_archivo,))
+        return cursor.fetchone() is not None
+    except: return False
+
+def proceso_base_datos(df_config):
+    print("\n--- INICIANDO FASE 2: ACTUALIZACIÓN DE BASE DE DATOS ---")
+    
+    ruta_descargas = df_config.iloc[1, 3] 
+    fecha_ini = df_config.iloc[1, 4] 
+    fecha_fin = df_config.iloc[1, 5] 
+    
+    # Listas de control para el filtro
+    dias_permitidos, meses_permitidos = generar_fechas_permitidas(fecha_ini, fecha_fin)
+    
+    print(f"🔌 Conectando a BD: {NOMBRE_DB}")
+    conn = sqlite3.connect(NOMBRE_DB)
+    cursor = conn.cursor()
+    
+    print(f"📂 Escaneando archivos locales...")
+    patron = os.path.join(ruta_descargas, "**", "*.tx*")
+    archivos = glob.glob(patron, recursive=True)
+    
+    guardados = 0
+    omitidos = 0
+    ignorados = 0
+    
+    for ruta_completa in archivos:
+        nombre_archivo = os.path.basename(ruta_completa)
+        nombre_tabla, fecha_identificador, version = extraer_info_nombre(nombre_archivo)
+        anio_carpeta = obtener_anio_de_carpeta(ruta_completa)
+        
+        # 💥 FILTRO ESTRICTO CORREGIDO 💥
+        es_valido = False
+        
+        # Verificar si es un archivo mensual (está en la lista de especiales)
+        if nombre_tabla in ARCHIVOS_MENSUALES:
+            # Validar: Año carpeta == Año solicitado Y Mes (identificador) == Mes permitido
+            clave_mes = f"{anio_carpeta}-{fecha_identificador}" # Ej: 2025-10
+            if clave_mes in meses_permitidos:
+                es_valido = True
+        else:
+            # Archivo diario: Validar MMDD (fecha_identificador)
+            if fecha_identificador in dias_permitidos:
+                # Opcional: Validar año también si es crítico, pero MMDD suele bastar para el filtro rápido
+                # Si quieres ser super estricto, verifica que el año coincida con el rango también.
+                es_valido = True
+
+        if not es_valido:
+            ignorados += 1
+            continue
+
+        # Si pasa el filtro de fecha, validamos si ya existe en BD
+        if archivo_ya_procesado(cursor, nombre_tabla, nombre_archivo):
+            omitidos += 1
+            continue
+
+        try:
+            # Lectura robusta
+            df = pd.read_csv(ruta_completa, sep=';', decimal='.', encoding='latin-1', on_bad_lines='skip', engine='python')
+            df.columns = df.columns.str.strip().str.replace(' ', '_').str.lower()
+            
+            df['origen_archivo'] = nombre_archivo
+            df['anio'] = anio_carpeta
+            df['mes_dia'] = fecha_identificador
+            df['version_dato'] = version
+            df['fecha_carga'] = pd.Timestamp.now()
+            
+            df.to_sql(nombre_tabla, conn, if_exists='append', index=False)
+            print(f"   💾 Guardado: {nombre_archivo}")
+            guardados += 1
+            
+        except Exception as e:
+            print(f"   ⚠️ Error leyendo {nombre_archivo}: {e}")
+
+    conn.close()
+    print(f"✅ FASE 2 TERMINADA.")
+    print(f"   📥 Insertados: {guardados}")
+    print(f"   ⏭️ Omitidos (Ya en BD): {omitidos}")
+    print(f"   🚫 Ignorados (Fuera de rango): {ignorados}")
+
+def main():
+    print(f"🚀 INICIANDO SISTEMA XM (Final con Soporte Mensual y Filtro)")
+    try:
+        df_config = pd.read_excel(ARCHIVO_EXCEL, sheet_name=HOJA_NOMBRE, header=None, engine='openpyxl')
+    except Exception as e:
+        print(f"❌ Error crítico leyendo Excel: {e}")
+        input("Enter para salir...")
+        return
+
+    try:
+        proceso_descarga(df_config)
+    except Exception as e:
+        print(f"❌ Error en Descarga: {e}")
+
+    try:
+        proceso_base_datos(df_config)
+    except Exception as e:
+        print(f"❌ Error en Base de Datos: {e}")
+
+    print("\n🏁 PROCESO FINALIZADO.")
+    input("Presiona Enter para cerrar...")
+
+if __name__ == "__main__":
+    main()

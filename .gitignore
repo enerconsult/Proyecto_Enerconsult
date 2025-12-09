@@ -1,0 +1,14 @@
+# Base de datos grande
+BaseDatosXM.db
+*.db
+*.sqlite
+
+# Archivos temporales y de sistema
+__pycache__/
+*.pyc
+~$*
+.DS_Store
+
+# Logs y configs locales con secretos
+config_app.json
+*.log

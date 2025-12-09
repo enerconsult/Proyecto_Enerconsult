@@ -1,0 +1,105 @@
+Sub DescargarArchivos_cURL_FINAL_ORGANIZADO_Y_OPTIMIZADO()
+    ' CONFIGURACIÓN INICIAL Y DECLARACIÓN DE VARIABLES
+    Dim hoja As Worksheet
+    Set hoja = ThisWorkbook.Sheets(1)
+    
+    ' **RUTA DE cURL (PREFERIDO PARA EVITAR BLOQUEOS)**
+    Dim rutaCurl As String
+    rutaCurl = "C:\Windows\System32\curl.exe"
+    
+    If Dir(rutaCurl) = "" Then
+        MsgBox "ERROR: No se encontró cURL.exe.", vbCritical
+        Exit Sub
+    End If
+
+        ' --- EXTENSIONES A BUSCAR ---
+    Dim extensiones(1 To 9) As String
+    extensiones(1) = ".tx1"
+    extensiones(2) = ".tx2"
+    extensiones(3) = ".txf"
+    extensiones(4) = ".txr"
+    extensiones(5) = ".txa"
+    extensiones(6) = ".tx3"
+    extensiones(7) = ".tx4"
+    extensiones(8) = ".tx5"
+    extensiones(9) = ".tx6"
+    
+    
+    ' --- LEER VARIABLES DEL EXCEL ---
+    Dim usuarioExcel As String, pass As String, rutaLocalBase As String
+    Dim fechaIni As Date, fechaFin As Date
+    
+    usuarioExcel = hoja.Range("A2").Value
+    pass = hoja.Range("B2").Value
+    rutaLocalBase = hoja.Range("D2").Value ' Esta es la ruta base (Ej: C:\Users\...\Proyecto Enerconsult\)
+    fechaIni = hoja.Range("E2").Value ' Fecha Inicial
+    fechaFin = hoja.Range("F2").Value ' Fecha Final
+    
+    If Right(rutaLocalBase, 1) <> "\" Then rutaLocalBase = rutaLocalBase & "\"
+    
+    ' --- VARIABLES DE BUCLE Y CARPETAS ---
+    Dim fechaActual As Date
+    Dim fechaDia As String ' Formato MMDD
+    Dim carpetaMes As String
+    Dim rutaLocalDescarga As String ' Nueva ruta para la descarga (incluye la carpeta del mes)
+    Dim fila As Long
+    Dim nombreArchivoBase As String
+    Dim rutaRemotaBase As String
+    Dim nombreArchivoCompleto As String
+    Dim comando As String
+    Dim extIndex As Long
+    
+    fechaActual = fechaIni
+    
+    ' Bucle 1 (EXTERNO): Itera día por día
+    Do While fechaActual <= fechaFin
+        
+        ' 1. CREAR LA CARPETA DEL MES/AÑO
+        carpetaMes = Format(fechaActual, "yyyy-mm") ' Ej: 2024-10
+        rutaLocalDescarga = rutaLocalBase & carpetaMes & "\"
+        
+        ' Crear la carpeta si no existe, y omitir error si ya existe
+        On Error Resume Next
+        MkDir rutaLocalDescarga
+        On Error GoTo 0
+        
+        fechaDia = Format(fechaActual, "mmdd") ' Ej: 1001
+        
+        ' Bucle 2: Itera sobre los archivos en la Columna A (desde Fila 6)
+        fila = 6
+        Do While Trim(hoja.Range("A" & fila).Value) <> ""
+            nombreArchivoBase = hoja.Range("A" & fila).Value
+            rutaRemotaBase = hoja.Range("B" & fila).Value
+            
+            ' Asegurar que la ruta remota base termine en barra
+            If Right(rutaRemotaBase, 1) <> "/" Then rutaRemotaBase = rutaRemotaBase & "/"
+            
+            ' Bucle 3 (INTERNO): Itera sobre cada extensión
+            For extIndex = LBound(extensiones) To UBound(extensiones)
+                
+                ' CONSTRUYE EL NOMBRE COMPLETO: Base + MMDD + Extensión
+                nombreArchivoCompleto = nombreArchivoBase & fechaDia & extensiones(extIndex)
+                
+                ' ?? VALIDACIÓN: Solo descarga si el archivo no está en la carpeta local
+                If Dir(rutaLocalDescarga & nombreArchivoCompleto) = "" Then
+                
+                    ' COMANDO cURL: La ruta local usa rutaLocalDescarga
+                    comando = """" & rutaCurl & """ --ftp-ssl -k -u """ & usuarioExcel & ":" & pass & """ ftp://xmftps.xm.com.co:210" & rutaRemotaBase & nombreArchivoCompleto & " -o """ & rutaLocalDescarga & nombreArchivoCompleto & """"
+                    
+                    ' Ejecutar y esperar (Ejecución OCULTA)
+                    CreateObject("WScript.Shell").Run comando, 0, True
+                
+                End If
+                
+            Next extIndex
+            
+            fila = fila + 1
+        Loop
+        
+        ' Avanzar un día
+        fechaActual = DateAdd("d", 1, fechaActual)
+    Loop
+    
+    MsgBox "Proceso terminado. Archivos descargados y organizados en subcarpetas de: " & rutaLocalBase, vbInformation
+
+End Sub

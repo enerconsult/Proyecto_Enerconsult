@@ -1,0 +1,287 @@
+import ftplib
+import ssl
+import os
+import pandas as pd
+from datetime import timedelta
+import sys
+import time
+
+# --- SILENCIAR ADVERTENCIAS DE EXCEL ---
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+
+# --- CONFIGURACIÓN DE RUTAS ---
+if getattr(sys, 'frozen', False):
+    app_path = os.path.dirname(sys.executable)
+else:
+    app_path = os.path.dirname(os.path.abspath(__file__))
+
+NOMBRE_ARCHIVO = "DescargasXM.xlsm"  # <--- CONFIRMA EL NOMBRE DE TU EXCEL
+ARCHIVO_EXCEL = os.path.join(app_path, NOMBRE_ARCHIVO)
+HOJA_NOMBRE = "Hoja1"
+
+def conectar_ftps(usuario, password):
+    context = ssl.create_default_context()
+    context.set_ciphers('DEFAULT:@SECLEVEL=1')
+    ftps = ftplib.FTP_TLS(context=context)
+    print(f"🔌 Conectando al servidor XM...")
+    try:
+        ftps.connect('xmftps.xm.com.co', 210)
+        ftps.login(usuario, password)
+        ftps.prot_p()
+        print("✅ ¡Conexión Establecida!")
+    except Exception as e:
+        raise Exception(f"Error de conexión: {e}")
+    return ftps
+
+def obtener_meses_unicos(fecha_ini, fecha_fin):
+    # Genera una lista de meses únicos (Ej: 2025-10, 2025-11) en el rango
+    meses = set()
+    delta = fecha_fin - fecha_ini
+    for i in range(delta.days + 1):
+        dia = fecha_ini + timedelta(days=i)
+        meses.add(dia.strftime("%Y-%m"))
+    return sorted(list(meses))
+
+def descargar_archivos():
+    print(f"📖 Leyendo configuración...")
+    try:
+        df_config = pd.read_excel(ARCHIVO_EXCEL, sheet_name=HOJA_NOMBRE, header=None, engine='openpyxl')
+    except Exception as e:
+        print(f"❌ Error leyendo Excel: {e}")
+        return
+
+    # Leer variables
+    usuario = df_config.iloc[1, 0]
+    password = df_config.iloc[1, 1]
+    ruta_local_base = df_config.iloc[1, 3]
+    fecha_ini = df_config.iloc[1, 4]
+    fecha_fin = df_config.iloc[1, 5]
+    
+    # Leer lista de archivos a buscar
+    lista_archivos = df_config.iloc[5:, [0, 1]].dropna()
+    lista_archivos.columns = ['NombreBase', 'RutaRemota']
+
+    # Conectar
+    ftps = conectar_ftps(usuario, password)
+
+    # Obtener lista de meses a procesar
+    meses_a_procesar = obtener_meses_unicos(fecha_ini, fecha_fin)
+    
+    total_descargados = 0
+    total_omitidos = 0
+
+    # --- BUCLE POR MESES (En vez de días) ---
+    for anio_mes in meses_a_procesar:
+        print(f"\n{'='*50}")
+        print(f"📂 PROCESANDO MES: {anio_mes}")
+        print(f"{'='*50}")
+
+        # Preparar carpeta local del mes
+        ruta_local_mes = os.path.join(ruta_local_base, anio_mes)
+        if not os.path.exists(ruta_local_mes):
+            os.makedirs(ruta_local_mes)
+
+        # Agrupar por ruta remota base (Columna B)
+        grupos = lista_archivos.groupby('RutaRemota')
+
+        for ruta_remota_base, grupo in grupos:
+            ruta_remota_base = str(ruta_remota_base).strip()
+            
+            # Construir la ruta remota completa para este mes
+            # Asumimos que la ruta en Excel NO tiene el mes al final, o si lo tiene, hay que ajustarlo.
+            # Según tu código anterior, la lógica era: RutaBase + AAAA-MM
+            
+            # Limpieza: Si la ruta en Excel termina en AAAA-MM, la usamos tal cual.
+            # Si es genérica, le pegamos el mes.
+            # Para estar seguros, usaremos la lógica de tu código VBA: RutaBase + AnioMes
+            
+            if ruta_remota_base.endswith("/"):
+                ruta_remota_final = f"{ruta_remota_base}{anio_mes}"
+            elif ruta_remota_base.endswith(anio_mes):
+                ruta_remota_final = ruta_remota_base
+            else:
+                ruta_remota_final = f"{ruta_remota_base}/{anio_mes}"
+
+            # Entrar a la carpeta remota
+            try:
+                ftps.cwd(ruta_remota_final)
+            except:
+                # Intento alternativo: a veces la ruta en Excel ya trae el mes fijo.
+                try:
+                    ftps.cwd(ruta_remota_base)
+                except:
+                    print(f"   ⚠️ No pude entrar a: {ruta_remota_final}")
+                    continue
+
+            print(f"   🔎 Analizando carpeta: {ftps.pwd()} ...")
+            
+            try:
+                archivos_en_servidor = ftps.nlst()
+            except:
+                print(f"   ⚠️ Error listando archivos.")
+                continue
+
+            # Iterar sobre los Nombres Base que queremos (Columna A)
+            for _, row in grupo.iterrows():
+                nombre_base = str(row['NombreBase']).strip()
+                
+                # --- LA MAGIA: FILTRO AMPLIO ---
+                # Buscamos cualquier cosa que empiece con el nombre base
+                # Ej: si busco "arrpas", traigo "arrpas1001.tx1", "arrpas1005.txr", etc.
+                
+                coincidencias = [
+                    f for f in archivos_en_servidor 
+                    if os.path.basename(f).lower().startswith(nombre_base.lower())
+                ]
+
+                if not coincidencias:
+                    # print(f"      🔸 Sin archivos para: {nombre_base}")
+                    continue
+
+                for archivo in coincidencias:
+                    nombre_limpio = os.path.basename(archivo)
+                    ruta_destino = os.path.join(ruta_local_mes, nombre_limpio)
+
+                    if os.path.exists(ruta_destino):
+                        # print(f"      ⏭️ Existe: {nombre_limpio}") # Descomentar si quieres ver los saltados
+                        total_omitidos += 1
+                        continue
+                    
+                    print(f"      ⬇️ DESCARGANDO: {nombre_limpio}")
+                    try:
+                        with open(ruta_destino, "wb") as local_file:
+                            ftps.retrbinary(f"RETR {archivo}", local_file.write)
+                        total_descargados += 1
+                    except Exception as e:
+                        print(f"      ❌ Error: {e}")
+
+    try:
+        ftps.quit()
+    except:
+        pass
+    
+    print("\n" + "="*40)
+    print(f"🏁 RESUMEN FINAL")
+    print(f"📥 Descargados: {total_descargados}")
+    print(f"⏭️ Omitidos: {total_omitidos}")
+    print("="*40)
+    input("Presiona Enter para cerrar...")
+
+if __name__ == "__main__":
+    try:
+        descargar_archivos()
+    except Exception as e:
+        print(f"\n❌ ERROR CRÍTICO: {e}")
+        input("Presiona Enter para salir...")
+
+import sqlite3
+import pandas as pd
+import os
+import glob
+import re
+
+# --- CONFIGURACIÓN ---
+# Ruta donde están tus archivos descargados
+RUTA_DESCARGAS = r"C:\Users\jqele\Box Sync\Enerconsult\Proyecto Enerconsult" 
+
+# Nombre de la base de datos
+NOMBRE_DB = "BaseDatosXM.db"
+
+def extraer_info_nombre(nombre_archivo):
+    """
+    Analiza el nombre del archivo para sacar tabla y dia-mes
+    Ej: trsd1101.tx1 -> Tabla: trsd, MMDD: 1101, Ext: tx1
+    """
+    nombre_base, extension = os.path.splitext(nombre_archivo)
+    extension = extension.replace(".", "") 
+    
+    match = re.search(r"\d", nombre_base)
+    
+    if match:
+        nombre_tabla = nombre_base[:match.start()]
+        fecha_mmdd = nombre_base[match.start():] # Ej: 1001
+    else:
+        nombre_tabla = nombre_base
+        fecha_mmdd = "0000"
+        
+    return nombre_tabla, fecha_mmdd, extension
+
+def obtener_anio_de_carpeta(ruta_completa):
+    """
+    Analiza la ruta de la carpeta para sacar el año.
+    Asume estructura: .../2025-10/archivo.tx1
+    """
+    try:
+        # Obtiene el nombre de la carpeta padre (Ej: "2025-10")
+        carpeta_padre = os.path.basename(os.path.dirname(ruta_completa))
+        
+        # Intenta separar por guión para sacar el año (Ej: "2025" de "2025-10")
+        if "-" in carpeta_padre:
+            return carpeta_padre.split("-")[0]
+        else:
+            # Si la carpeta es solo "2025", devuelve eso
+            return carpeta_padre
+    except:
+        return "0000" # Si falla
+
+
+def cargar_a_sqlite():
+    print(f"🔌 Conectando a la base de datos: {NOMBRE_DB}...")
+    conn = sqlite3.connect(NOMBRE_DB)
+    cursor = conn.cursor() # Necesitamos un cursor para ejecutar SQL directo
+    
+    patron_busqueda = os.path.join(RUTA_DESCARGAS, "**", "*.tx*")
+    archivos = glob.glob(patron_busqueda, recursive=True)
+    
+    print(f"📂 Se encontraron {len(archivos)} archivos para procesar.")
+    
+    archivos_procesados = 0
+    
+    for ruta_completa in archivos:
+        nombre_archivo = os.path.basename(ruta_completa)
+        nombre_tabla, fecha_mmdd, version = extraer_info_nombre(nombre_archivo)
+        anio_carpeta = obtener_anio_de_carpeta(ruta_completa)
+        
+        if len(nombre_tabla) < 2: continue
+
+        try:
+            # --- PASO NUEVO: LIMPIEZA DE DUPLICADOS ---
+            # Antes de cargar, borramos si ya existe info de este archivo exacto
+            # Esto evita que se duplique si corres el script 2 veces.
+            try:
+                query_borrar = f"DELETE FROM {nombre_tabla} WHERE origen_archivo = ?"
+                cursor.execute(query_borrar, (nombre_archivo,))
+                conn.commit()
+            except:
+                # Si la tabla no existe, dará error, pero no importa, seguimos.
+                pass
+
+            # 2. Leer el archivo
+            df = pd.read_csv(ruta_completa, sep=',', encoding='latin-1')
+            df.columns = df.columns.str.strip().str.replace(' ', '_').str.lower()
+            
+            # 3. Agregar metadatos
+            df['origen_archivo'] = nombre_archivo
+            df['anio'] = anio_carpeta
+            df['mes_dia'] = fecha_mmdd
+            df['version_dato'] = version
+            df['fecha_carga'] = pd.Timestamp.now()
+            
+            # 4. Guardar
+            df.to_sql(nombre_tabla, conn, if_exists='append', index=False)
+            
+            print(f"   ✅ Actualizado: {nombre_tabla} | Archivo: {nombre_archivo}")
+            archivos_procesados += 1
+            
+        except Exception as e:
+            print(f"   ❌ Error cargando {nombre_archivo}: {e}")
+
+    # OPTIMIZACIÓN FINAL: VACUUM
+    # Esto compacta la base de datos al final para que pese lo menos posible
+    print("🧹 Compactando base de datos...")
+    conn.execute("VACUUM") 
+    
+    conn.close()
+    print(f"\n🏁 PROCESO TERMINADO. {archivos_procesados} archivos procesados.")
+    input("Presiona Enter para cerrar...")

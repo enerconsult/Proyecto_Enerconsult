@@ -1,0 +1,123 @@
+Sub DescargarArchivos_cURL_FINAL_RAPIDO()
+    ' [OPTIMIZACIÓN] Desactivar actualizaciones visuales para ganar velocidad
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.StatusBar = "Iniciando proceso de descarga..."
+
+    ' CONFIGURACIÓN INICIAL Y DECLARACIÓN DE VARIABLES
+    Dim hoja As Worksheet
+    Set hoja = ThisWorkbook.Sheets(1)
+    
+    ' **RUTA DE cURL **
+    Dim rutaCurl As String
+    rutaCurl = "C:\Windows\System32\curl.exe"
+    
+    If Dir(rutaCurl) = "" Then
+        MsgBox "ERROR: No se encontró cURL.exe.", vbCritical
+        GoTo SalidaLimpia ' Ir a restaurar configuración antes de salir
+    End If
+
+    ' --- EXTENSIONES A BUSCAR ---
+    Dim extensiones(1 To 9) As String
+    extensiones(1) = ".tx1": extensiones(2) = ".tx2": extensiones(3) = ".txf"
+    extensiones(4) = ".txr": extensiones(5) = ".txa": extensiones(6) = ".tx3"
+    extensiones(7) = ".tx4": extensiones(8) = ".tx5": extensiones(9) = ".tx6"
+    
+    ' --- LEER VARIABLES DEL EXCEL ---
+    Dim usuarioExcel As String, pass As String, rutaLocalBase As String
+    Dim fechaIni As Date, fechaFin As Date
+    Dim usuarioEscapado As String
+    
+    usuarioExcel = hoja.Range("A2").Value
+    pass = hoja.Range("B2").Value
+    rutaLocalBase = hoja.Range("D2").Value
+    fechaIni = hoja.Range("E2").Value
+    fechaFin = hoja.Range("F2").Value
+    
+    If Right(rutaLocalBase, 1) <> "\" Then rutaLocalBase = rutaLocalBase & "\"
+    
+    ' Escapar el usuario por si acaso (aunque tu código funcionaba sin esto, es más seguro)
+    usuarioEscapado = Replace(usuarioExcel, "\", "\\")
+    
+    ' --- VARIABLES DE BUCLE Y CARPETAS ---
+    Dim fechaActual As Date
+    Dim fechaDia As String ' Formato MMDD
+    Dim carpetaMes As String
+    Dim rutaLocalDescarga As String
+    Dim fila As Long
+    Dim nombreArchivoBase As String
+    Dim rutaRemotaBase As String
+    Dim nombreArchivoCompleto As String
+    Dim comando As String
+    Dim extIndex As Long
+    
+    ' [OPTIMIZACIÓN CLAVE] Crear el objeto Shell UNA SOLA VEZ fuera del bucle
+    ' Esto ahorra mucho tiempo de procesamiento.
+    Dim wsh As Object
+    Set wsh = CreateObject("WScript.Shell")
+    
+    fechaActual = fechaIni
+    
+    ' Bucle 1 (EXTERNO): Itera día por día
+    Do While fechaActual <= fechaFin
+        
+        ' Actualizar barra de estado para seguimiento
+        Application.StatusBar = "Procesando fecha: " & fechaActual
+        
+        ' 1. CREAR LA CARPETA DEL MES/AÑO
+        carpetaMes = Format(fechaActual, "yyyy-mm")
+        rutaLocalDescarga = rutaLocalBase & carpetaMes & "\"
+        
+        ' Crear la carpeta si no existe
+        On Error Resume Next
+        MkDir rutaLocalDescarga
+        On Error GoTo 0
+        
+        fechaDia = Format(fechaActual, "mmdd")
+        
+        ' Bucle 2: Itera sobre los archivos en la Columna A (desde Fila 6)
+        fila = 6
+        Do While Trim(hoja.Range("A" & fila).Value) <> ""
+            nombreArchivoBase = hoja.Range("A" & fila).Value
+            rutaRemotaBase = hoja.Range("B" & fila).Value
+            
+            ' Asegurar que la ruta remota base termine en barra
+            If Right(rutaRemotaBase, 1) <> "/" Then rutaRemotaBase = rutaRemotaBase & "/"
+            
+            ' Bucle 3 (INTERNO): Itera sobre cada extensión
+            For extIndex = LBound(extensiones) To UBound(extensiones)
+                
+                ' CONSTRUYE EL NOMBRE COMPLETO
+                nombreArchivoCompleto = nombreArchivoBase & fechaDia & extensiones(extIndex)
+                
+                ' VALIDACIÓN: Solo descarga si el archivo no está en la carpeta local
+                If Dir(rutaLocalDescarga & nombreArchivoCompleto) = "" Then
+                
+                    ' COMANDO cURL (Tu lógica original intacta)
+                    comando = """" & rutaCurl & """ --ftp-ssl -k -u """ & usuarioExcel & ":" & pass & """ ftp://xmftps.xm.com.co:210" & rutaRemotaBase & nombreArchivoCompleto & " -o """ & rutaLocalDescarga & nombreArchivoCompleto & """"
+                    
+                    ' Ejecutar usando el objeto wsh ya creado (0 = Oculto, True = Esperar)
+                    wsh.Run comando, 0, True
+                    
+                    ' [OPTIMIZACIÓN] Permitir al sistema respirar para no congelarse
+                    DoEvents
+                End If
+                
+            Next extIndex
+            
+            fila = fila + 1
+        Loop
+        
+        ' Avanzar un día
+        fechaActual = DateAdd("d", 1, fechaActual)
+    Loop
+
+SalidaLimpia:
+    ' Restaurar configuración de Excel
+    Application.StatusBar = False
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    
+    MsgBox "✅ Proceso terminado. Archivos descargados y organizados en subcarpetas de: " & rutaLocalBase, vbInformation
+
+End Sub
