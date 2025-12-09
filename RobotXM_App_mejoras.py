@@ -20,6 +20,7 @@ import pandas as pd
 import sqlite3
 import glob
 import re
+import csv
 from datetime import datetime, timedelta
 import time
 import warnings
@@ -63,6 +64,32 @@ COLORES_GRAFICO = {
     "Negro": "#000000"
 }
 
+import logging
+import logging.handlers
+
+# --- CONFIGURACIÓN DE LOGGING ---
+def setup_logging():
+    logger = logging.getLogger("RobotXM")
+    logger.setLevel(logging.INFO)
+    
+    # Formato
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+    
+    # Handler Archivo (Rotativo 5MB x 3 backups)
+    fh = logging.handlers.RotatingFileHandler("robot_xm.log", maxBytes=5*1024*1024, backupCount=3, encoding='utf-8')
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    
+    # Handler Consola (Para que PrintRedirector lo capture)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(formatter)
+    ch.setLevel(logging.INFO)
+    logger.addHandler(ch)
+    
+    return logger
+
+log = setup_logging()
+
 # --- CONSTANTES DE OPTIMIZACIÓN ---
 DEFAULT_WORKERS = 4
 FTP_CONNECT_TIMEOUT = 30
@@ -79,12 +106,16 @@ class PrintRedirector:
 
     def write(self, str_val):
         try:
+            str_val = str(str_val) # Enforce string
             self.text_widget.configure(state='normal')
             self.text_widget.insert(tk.END, str_val)
             self.text_widget.see(tk.END)
             self.text_widget.configure(state='disabled')
             self.text_widget.update_idletasks()
-        except: pass
+        except tk.TclError:
+            pass # Widget destroyed
+        except Exception:
+            pass # Ignorar otros errores de UI logging
 
     def flush(self): pass
 
@@ -234,12 +265,17 @@ def width_chars(pixels):
     return int(pixels / 7)
 
 # --- IMPORTS ADICIONALES PARA RED ---
-import ftplib
-import ssl
+# (Ya importados al inicio)
 
 # =============================================================================
 #  MÓDULO DE OPTIMIZACIÓN Y HELPER FUNCTIONS
 # =============================================================================
+
+def safe_identifier(name: str) -> str:
+    """Valida que el nombre de tabla/columna sea seguro (alfanumérico + guiones bajos)."""
+    if not re.match(r'^[A-Za-z0-9_]+$', str(name)):
+        raise ValueError(f"Identificador inválido (posible inyección SQL): {name}")
+    return name
 
 def generar_fechas_permitidas(fecha_ini, fecha_fin):
     dias = []
@@ -287,12 +323,23 @@ def descargar_archivos_paralelo(config, lista_tareas, workers=4):
     def worker(tarea):
         ruta_remota, ruta_local = tarea
         conn = None
+        temp_path = ruta_local + ".part"
         try:
             conn = make_ftps_connection(usuario, password)
-            with open(ruta_local, 'wb') as f:
+            with open(temp_path, 'wb') as f:
                 retrbinary_safe(conn, f"RETR {ruta_remota}", f.write)
-            return (ruta_local, None)
+            
+            # Validación simple de atomicidad
+            if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
+                os.replace(temp_path, ruta_local) # Atomic rename
+                return (ruta_local, None)
+            else:
+                return (ruta_local, "Descarga vacía (0 bytes)")
+                
         except Exception as e:
+            if os.path.exists(temp_path):
+                try: os.remove(temp_path)
+                except: pass
             return (ruta_local, str(e))
         finally:
             if conn: 
@@ -314,17 +361,56 @@ def sqlite_fast_connect(db_path):
     except: pass
     return conn
 
-def bulk_insert_chunked(conn, ruta_csv, tabla, meta_cols, chunksize=50000):
-    total = 0
-    df_iter = pd.read_csv(ruta_csv, sep=';', decimal='.', encoding='latin-1', on_bad_lines='skip', engine='python', chunksize=chunksize)
-    for chunk in df_iter:
-        if chunk.empty: continue
-        chunk.columns = chunk.columns.str.strip().str.replace(' ', '_').str.lower()
-        for k, v in meta_cols.items():
-            chunk[k] = v
-        chunk.to_sql(tabla, conn, if_exists='append', index=False)
-        total += len(chunk)
-    return total
+def bulk_insert_fast(conn, ruta_csv, tabla, meta_cols, chunksize=50000):
+    # Validar nombre tabla
+    tabla = safe_identifier(tabla)
+    
+    total_rows = 0
+    # Detectar encoding o usar latin-1 por defecto (común en XM)
+    try:
+        with open(ruta_csv, newline='', encoding='latin-1') as f:
+            reader = csv.DictReader(f, delimiter=';', skipinitialspace=True)
+            if not reader.fieldnames: return 0
+            
+            # Normalizar columnas
+            cols_csv = [safe_identifier(c.strip().replace(' ', '_').lower()) for c in reader.fieldnames]
+            
+            # Columnas totales = CSV + Meta
+            all_cols = cols_csv + list(meta_cols.keys())
+            placeholders = ",".join(["?"] * len(all_cols))
+            
+            sql = f"INSERT INTO {tabla} ({','.join(all_cols)}) VALUES ({placeholders})"
+            
+            batch = []
+            
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                for row in reader:
+                    # Extraer valores del CSV
+                    vals = [row[k] for k in reader.fieldnames]
+                    # Agregar metadata
+                    vals.extend(meta_cols.values())
+                    
+                    batch.append(vals)
+                    
+                    if len(batch) >= chunksize:
+                        conn.executemany(sql, batch)
+                        total_rows += len(batch)
+                        batch = []
+                
+                if batch:
+                    conn.executemany(sql, batch)
+                    total_rows += len(batch)
+                
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise e
+                
+    except Exception as e:
+        raise e
+        
+    return total_rows
 
 def ensure_indexes(conn, tabla, cols):
     for col in cols:
@@ -332,8 +418,8 @@ def ensure_indexes(conn, tabla, cols):
         except: pass
 
 def proceso_descarga(config, es_reintento=False):
-    if es_reintento: print("\n--- 🔄 INICIANDO FASE DE RECUPERACIÓN (RE-DESCARGA) ---")
-    else: print("\n--- INICIANDO FASE 1: DESCARGA DE ARCHIVOS (PARALELA) ---")
+    if es_reintento: log.warning("--- 🔄 INICIANDO FASE DE RECUPERACIÓN (RE-DESCARGA) ---")
+    else: log.info("--- INICIANDO FASE 1: DESCARGA DE ARCHIVOS (PARALELA) ---")
     
     usuario = config['usuario']
     password = config['password']
@@ -343,19 +429,19 @@ def proceso_descarga(config, es_reintento=False):
         fecha_ini = datetime.strptime(config['fecha_ini'], "%Y-%m-%d")
         fecha_fin = datetime.strptime(config['fecha_fin'], "%Y-%m-%d")
     except ValueError:
-        print("❌ Error: Formato de fecha inválido. Use YYYY-MM-DD")
+        log.error("❌ Error: Formato de fecha inválido. Use YYYY-MM-DD")
         return
 
     lista_archivos = config['archivos_descarga'] 
     dias_permitidos, meses_permitidos = generar_fechas_permitidas(fecha_ini, fecha_fin)
 
-    print("   🔎 Buscando archivos en el servidor...")
+    log.info("🔎 Buscando archivos en el servidor...")
     tareas_descarga = [] 
     
     try:
         ftps = make_ftps_connection(usuario, password)
     except Exception as e:
-        print(f"❌ No se pudo conectar para listar: {e}")
+        log.error(f"❌ No se pudo conectar para listar: {e}")
         return
 
     mapa_archivos = {} 
@@ -413,20 +499,20 @@ def proceso_descarga(config, es_reintento=False):
     
     total_archivos = len(tareas_descarga)
     if total_archivos == 0:
-        print("✅ Todo actualizado.")
+        log.info("✅ Todo actualizado.")
         return
 
-    print(f"   ⬇️ Iniciando descarga de {total_archivos} archivos...")
+    log.info(f"⬇️ Iniciando descarga de {total_archivos} archivos...")
     resultados = descargar_archivos_paralelo(config, tareas_descarga, workers=DEFAULT_WORKERS)
     
     errores = [r for r in resultados if r[1] is not None]
     exitos = len(resultados) - len(errores)
     
-    print(f"      ✅ Éxitos: {exitos}")
+    log.info(f"   ✅ Éxitos: {exitos}")
     if errores:
-        print(f"      ❌ Errores: {len(errores)}")
+        log.error(f"   ❌ Errores: {len(errores)}")
         for path, err in errores[:5]:
-            print(f"         - {os.path.basename(str(path))}: {err}")
+            log.error(f"      - {os.path.basename(str(path))}: {err}")
 
 # =============================================================================
 #  MÓDULO 1: LÓGICA DE NEGOCIO
@@ -450,7 +536,7 @@ def obtener_anio_de_carpeta(ruta_completa):
     except: return "0000"
 
 def cargar_cache_archivos_existentes(cursor):
-    print("   🧠 Cargando memoria de archivos procesados...")
+    log.info("🧠 Cargando memoria de archivos procesados...")
     cache = set()
     try:
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -464,12 +550,12 @@ def cargar_cache_archivos_existentes(cursor):
                         if archivo: cache.add(archivo)
             except: pass
     except: pass
-    print(f"   🧠 Memoria lista: {len(cache)} archivos.")
+    log.info(f"🧠 Memoria lista: {len(cache)} archivos.")
     return cache
 
 def proceso_base_datos(config, es_reintento=False):
-    if es_reintento: print("\n--- 🔄 INICIANDO FASE DE PROCESAMIENTO (INTENTO #2) ---")
-    else: print("\n--- INICIANDO FASE 2: ACTUALIZACIÓN DE BASE DE DATOS (OPTIMIZADA) ---")
+    if es_reintento: log.warning("--- 🔄 INICIANDO FASE DE PROCESAMIENTO (INTENTO #2) ---")
+    else: log.info("--- INICIANDO FASE 2: ACTUALIZACIÓN DE BASE DE DATOS (OPTIMIZADA) ---")
     ruta_descargas = config['ruta_local']
     ruta_db_completa = os.path.join(ruta_descargas, NOMBRE_DB_FILE)
     try:
@@ -478,16 +564,16 @@ def proceso_base_datos(config, es_reintento=False):
     except: return False
     dias_permitidos, meses_permitidos = generar_fechas_permitidas(fecha_ini, fecha_fin)
     
-    print(f"🔌 Conectando a BD (Fast Mode): {ruta_db_completa}")
+    log.info(f"🔌 Conectando a BD (Fast Mode): {ruta_db_completa}")
     # Usar conexión optimizada
     conn = sqlite_fast_connect(ruta_db_completa)
     cursor = conn.cursor()
     archivos_procesados_cache = cargar_cache_archivos_existentes(cursor)
     
-    print(f"📂 Escaneando archivos locales...")
+    log.info(f"📂 Escaneando archivos locales...")
     patron = os.path.join(ruta_descargas, "**", "*.tx*")
     archivos = glob.glob(patron, recursive=True)
-    print(f"   🔍 Se encontraron {len(archivos)} archivos. Filtrando...")
+    log.info(f"🔍 Se encontraron {len(archivos)} archivos. Filtrando...")
 
     corruptos_eliminados = 0
     tablas_tocadas = set()
@@ -512,7 +598,7 @@ def proceso_base_datos(config, es_reintento=False):
             archivo_corrupto = True; razon = "0 bytes"
         
         if archivo_corrupto:
-            print(f"   🗑️ Corrupto ({razon}): {nombre_archivo} -> ELIMINADO")
+            log.warning(f"🗑️ Corrupto ({razon}): {nombre_archivo} -> ELIMINADO")
             try: os.remove(ruta_completa)
             except: pass
             corruptos_eliminados += 1
@@ -528,13 +614,13 @@ def proceso_base_datos(config, es_reintento=False):
                 'fecha_carga': str(pd.Timestamp.now())
             }
             
-            # Insertar en chunks
-            rows = bulk_insert_chunked(conn, ruta_completa, nombre_tabla, meta, chunksize=50000)
+            # Insertar en chunks (Optimizado con executemany)
+            rows = bulk_insert_fast(conn, ruta_completa, nombre_tabla, meta, chunksize=50000)
             
             if rows > 0:
                 archivos_procesados_cache.add(nombre_archivo)
                 tablas_tocadas.add(nombre_tabla)
-                print(f"   💾 Guardado ({rows} filas): {nombre_archivo}")
+                log.info(f"💾 Guardado ({rows} filas): {nombre_archivo}")
             else:
                 # Si no se insertó nada (pero no falló), asumimos vacío
                 raise Exception("Archivo vacío o sin datos válidos")
@@ -542,21 +628,21 @@ def proceso_base_datos(config, es_reintento=False):
         except Exception as e:
             # Detectar archivos vacíos o corruptos
             if "No columns to parse" in str(e) or "registros" in str(e).lower() or "vacío" in str(e).lower():
-                print(f"   🗑️ Archivo vacío detectado: {nombre_archivo}")
+                log.warning(f"🗑️ Archivo vacío detectado: {nombre_archivo}")
                 try: os.remove(ruta_completa)
                 except: pass
                 corruptos_eliminados += 1
             else:
-                print(f"   ⚠️ Error leyendo {nombre_archivo}: {e}")
+                log.error(f"⚠️ Error leyendo {nombre_archivo}: {e}")
 
     # Finalizar: Crear índices en tablas afectadas
     if tablas_tocadas:
-        print("   🔨 Optimizando índices...")
+        log.info("🔨 Optimizando índices...")
         for t in tablas_tocadas:
             ensure_indexes(conn, t, ['anio', 'mes_dia', 'version_dato', 'origen_archivo'])
             
     conn.close()
-    print(f"✅ FASE {'2' if not es_reintento else 'RECUPERACIÓN'} TERMINADA.")
+    log.info(f"✅ FASE {'2' if not es_reintento else 'RECUPERACIÓN'} TERMINADA.")
     if corruptos_eliminados > 0: return True 
     return False
 
@@ -575,7 +661,7 @@ def calcular_peso_version(extension):
     return 0 
 
 def generar_reporte_logica(config):
-    print("\n🚀 INICIANDO GENERADOR HORIZONTAL XM")
+    log.info("🚀 INICIANDO GENERADOR HORIZONTAL XM")
     ruta_local = config['ruta_local']
     ruta_db_completa = os.path.join(ruta_local, NOMBRE_DB_FILE)
     ruta_reporte_completa = os.path.join(ruta_local, NOMBRE_REPORTE_FILE)
@@ -595,12 +681,12 @@ def generar_reporte_logica(config):
         })
 
     if not os.path.exists(ruta_db_completa):
-        print(f"❌ No existe la BD en: {ruta_db_completa}")
+        log.error(f"❌ No existe la BD en: {ruta_db_completa}")
         return
 
     conn = sqlite3.connect(ruta_db_completa)
     cursor = conn.cursor()
-    print(f"⚙️ Generando reporte en: {ruta_reporte_completa}")
+    log.info(f"⚙️ Generando reporte en: {ruta_reporte_completa}")
     
     try:
         with pd.ExcelWriter(ruta_reporte_completa, engine='openpyxl') as writer:
@@ -685,11 +771,11 @@ def generar_reporte_logica(config):
                     df_final.to_excel(writer, sheet_name="Datos", startrow=1, startcol=columna_actual, index=False)
                     columna_actual += len(df_final.columns) + 1 
                     tablas_escritas += 1
-                except Exception as e: print(f"      ❌ Error interno: {e}")
+                except Exception as e: log.error(f"      ❌ Error interno: {e}")
         conn.close()
-        if tablas_escritas > 0: print(f"\n✅ REPORTE LISTO: {ruta_reporte_completa}")
-        else: print("\n⚠️ Reporte vacío.")
-    except Exception as e: print(f"❌ Error guardando Excel: {e}")
+        if tablas_escritas > 0: log.info(f"✅ REPORTE LISTO: {ruta_reporte_completa}")
+        else: log.warning("⚠️ Reporte vacío.")
+    except Exception as e: log.error(f"❌ Error guardando Excel: {e}")
 
 # =============================================================================
 #  MÓDULO 4: VISUALIZADOR (INTEGRADO EN PESTAÑA)
@@ -1308,6 +1394,47 @@ class AplicacionXM:
         
         # Cargar valores iniciales en dashboard (al final de todo)
         self.actualizar_dashboard()
+        
+        # FIX: Redirigir logging a la consola UI
+        self.update_logger_output()
+
+    def update_logger_output(self):
+        """Redirige los logs al widget de texto en la GUI"""
+        logger = logging.getLogger("RobotXM")
+        # Remover handlers de consola antiguos para evitar duplicados
+        for h in logger.handlers[:]:
+            # Cuidado: FileHandler hereda de StreamHandler, usamos type() para distinguir
+            if type(h) is logging.StreamHandler:
+                logger.removeHandler(h)
+        
+        # Nuevo handler apuntando al redirector (sys.stdout ya fue parcheado)
+        # O podemos pasar self.redirector directamente si lo guardamos en self
+        # Como sys.stdout ya es el redirector:
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+        ch.setLevel(logging.INFO)
+        logger.addHandler(ch)
+
+
+    def toggle_controls(self, state='normal'):
+        """Bloquea o desbloquea botones críticos durante procesos."""
+        try:
+            self.btn_guardar.config(state=state)
+            self.btn_descargar.config(state=state)
+            self.btn_reporte.config(state=state)
+        except: pass
+
+    def validar_config(self):
+        cfg = self.get_config()
+        if not cfg['usuario'] or not cfg['password']:
+            messagebox.showwarning("Configuración Incompleta", "Por favor ingresa Usuario y Password FTP.")
+            return False
+        if not os.path.exists(cfg['ruta_local']):
+            try: os.makedirs(cfg['ruta_local'])
+            except: 
+                messagebox.showerror("Ruta Inválida", "La ruta local no existe y no se pudo crear.")
+                return False
+        return True
 
     def configurar_estilos_modernos(self):
         style = ttk.Style()
@@ -1423,9 +1550,12 @@ class AplicacionXM:
 
         fr_btn = ttk.Frame(self.tab_general)
         fr_btn.pack(fill="x", padx=10, pady=15)
-        ttk.Button(fr_btn, text="💾 Guardar Config", command=self.guardar_config, style="Success.TButton").pack(side="left", padx=5)
-        ttk.Button(fr_btn, text="🚀 EJECUTAR DESCARGA + BD", command=self.run_descarga, style="Primary.TButton").pack(side="left", padx=20)
-        ttk.Button(fr_btn, text="📈 GENERAR REPORTE", command=self.run_reporte, style="Primary.TButton").pack(side="left", padx=5)
+        self.btn_guardar = ttk.Button(fr_btn, text="💾 Guardar Config", command=self.guardar_config, style="Success.TButton")
+        self.btn_guardar.pack(side="left", padx=5)
+        self.btn_descargar = ttk.Button(fr_btn, text="🚀 EJECUTAR DESCARGA + BD", command=self.run_descarga, style="Primary.TButton")
+        self.btn_descargar.pack(side="left", padx=20)
+        self.btn_reporte = ttk.Button(fr_btn, text="📈 GENERAR REPORTE", command=self.run_reporte, style="Primary.TButton")
+        self.btn_reporte.pack(side="left", padx=5)
 
         # --- DASHBOARD INFORMATIVO ---
         fr_dash = tk.Frame(self.tab_general, bg="#f4f6f7")
@@ -1608,20 +1738,37 @@ class AplicacionXM:
         return {}
 
     def run_descarga(self):
+        if not self.validar_config(): return
+        self.toggle_controls('disabled')
         threading.Thread(target=self._exec_descarga, args=(self.get_config(),)).start()
     
     def _exec_descarga(self, cfg):
-        proceso_descarga(cfg)
-        necesita_fix = proceso_base_datos(cfg)
-        if necesita_fix:
-            print("\n⚠️ DETECTADOS ARCHIVOS CORRUPTOS. AUTORREPARANDO...")
-            time.sleep(1)
-            proceso_descarga(cfg, es_reintento=True)
-            proceso_base_datos(cfg, es_reintento=True)
-        print("\n🏁 PROCESO FINALIZADO.")
+        try:
+            proceso_descarga(cfg)
+            necesita_fix = proceso_base_datos(cfg)
+            if necesita_fix:
+                log.warning("⚠️ DETECTADOS ARCHIVOS CORRUPTOS. AUTORREPARANDO...")
+                time.sleep(1)
+                proceso_descarga(cfg, es_reintento=True)
+                proceso_base_datos(cfg, es_reintento=True)
+            log.info("🏁 PROCESO FINALIZADO.")
+        except Exception as e:
+            log.error(f"❌ Error crítico en proceso: {e}")
+        finally:
+            self.root.after(0, lambda: self.toggle_controls('normal'))
 
     def run_reporte(self):
-        threading.Thread(target=generar_reporte_logica, args=(self.get_config(),)).start()
+        if not self.validar_config(): return
+        self.toggle_controls('disabled')
+        threading.Thread(target=self._exec_reporte, args=(self.get_config(),)).start()
+
+    def _exec_reporte(self, cfg):
+        try:
+            generar_reporte_logica(cfg)
+        except Exception as e:
+            log.error(f"❌ Error crítico generando reporte: {e}")
+        finally:
+            self.root.after(0, lambda: self.toggle_controls('normal'))
 
 if __name__ == "__main__":
     root = tk.Tk()

@@ -51,12 +51,12 @@ LOGO_FILENAME = "logo_empresa.png"
 
 # COLORES
 COLORES_GRAFICO = {
-    "Verde Corporativo": "#8cc63f",
-    "Azul Corporativo": "#0093d0",
+    "Verde Corporativo": "#6E9D2F",
+    "Azul Corporativo": "#0088C2",
     "Rojo Intenso": "#e74c3c",
     "Naranja": "#f39c12",
     "Morado": "#9b59b6",
-    "Gris Oscuro": "#34495e",
+    "Gris Oscuro": "#3E5770",
     "Negro": "#000000"
 }
 
