@@ -23,6 +23,10 @@ import re
 from datetime import datetime, timedelta
 import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import socket
+from typing import List, Tuple
+from functools import partial
 
 # --- LIBRERÍAS GRÁFICAS ---
 import matplotlib
@@ -56,9 +60,15 @@ COLORES_GRAFICO = {
     "Rojo Intenso": "#e74c3c",
     "Naranja": "#f39c12",
     "Morado": "#9b59b6",
-    "Gris Oscuro": "#3E5770",
     "Negro": "#000000"
 }
+
+# --- CONSTANTES DE OPTIMIZACIÓN ---
+DEFAULT_WORKERS = 4
+FTP_CONNECT_TIMEOUT = 30
+FTP_RETRIES = 3
+RETRY_BACKOFF = 2.0 
+
 
 # =============================================================================
 #  CLASE PARA REDIRIGIR LA CONSOLA
@@ -223,36 +233,107 @@ def width_chars(pixels):
     # Estimación aproximada de caracteres basado en pixeles (depende de la fuente)
     return int(pixels / 7)
 
+# --- IMPORTS ADICIONALES PARA RED ---
+import ftplib
+import ssl
 
 # =============================================================================
-#  MÓDULO 1: LÓGICA DE NEGOCIO
+#  MÓDULO DE OPTIMIZACIÓN Y HELPER FUNCTIONS
 # =============================================================================
 
 def generar_fechas_permitidas(fecha_ini, fecha_fin):
-    dias_validos = set()
-    meses_validos = set()
+    dias = []
+    meses = set()
     delta = fecha_fin - fecha_ini
     for i in range(delta.days + 1):
         dia = fecha_ini + timedelta(days=i)
-        dias_validos.add(dia.strftime("%m%d"))
-        meses_validos.add(dia.strftime("%Y-%m"))
-    return dias_validos, meses_validos
+        dias.append(dia.strftime("%d"))
+        meses.add(dia.strftime("%Y-%m"))
+    return dias, meses
 
-def conectar_ftps(usuario, password):
+def make_ftps_connection(usuario, password):
     context = ssl.create_default_context()
-    context.set_ciphers('DEFAULT:@SECLEVEL=1') 
+    context.set_ciphers('DEFAULT:@SECLEVEL=1')
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
     ftps = ftplib.FTP_TLS(context=context)
     try:
-        ftps.connect('xmftps.xm.com.co', 210)
-        ftps.login(usuario, password)
+        ftps.connect('xmftps.xm.com.co', 210, timeout=FTP_CONNECT_TIMEOUT)
+        ftps.auth()
         ftps.prot_p()
+        ftps.login(usuario, password)
     except Exception as e:
         raise Exception(f"Fallo conexión FTP: {e}")
     return ftps
 
+def conectar_ftps(usuario, password):
+    return make_ftps_connection(usuario, password)
+
+def retrbinary_safe(ftps, cmd, callback, blocksize=8192):
+    attempts = 0
+    while attempts < FTP_RETRIES:
+        try:
+            ftps.retrbinary(cmd, callback, blocksize)
+            return
+        except Exception as e:
+            attempts += 1
+            if attempts >= FTP_RETRIES: raise e
+            time.sleep(RETRY_BACKOFF * attempts)
+
+def descargar_archivos_paralelo(config, lista_tareas, workers=4):
+    usuario = config['usuario']
+    password = config['password']
+    
+    def worker(tarea):
+        ruta_remota, ruta_local = tarea
+        conn = None
+        try:
+            conn = make_ftps_connection(usuario, password)
+            with open(ruta_local, 'wb') as f:
+                retrbinary_safe(conn, f"RETR {ruta_remota}", f.write)
+            return (ruta_local, None)
+        except Exception as e:
+            return (ruta_local, str(e))
+        finally:
+            if conn: 
+                try: conn.quit()
+                except: pass
+
+    resultados = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_url = {executor.submit(worker, t): t for t in lista_tareas}
+        for future in as_completed(future_to_url):
+            resultados.append(future.result())
+    return resultados
+
+def sqlite_fast_connect(db_path):
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+    except: pass
+    return conn
+
+def bulk_insert_chunked(conn, ruta_csv, tabla, meta_cols, chunksize=50000):
+    total = 0
+    df_iter = pd.read_csv(ruta_csv, sep=';', decimal='.', encoding='latin-1', on_bad_lines='skip', engine='python', chunksize=chunksize)
+    for chunk in df_iter:
+        if chunk.empty: continue
+        chunk.columns = chunk.columns.str.strip().str.replace(' ', '_').str.lower()
+        for k, v in meta_cols.items():
+            chunk[k] = v
+        chunk.to_sql(tabla, conn, if_exists='append', index=False)
+        total += len(chunk)
+    return total
+
+def ensure_indexes(conn, tabla, cols):
+    for col in cols:
+        try: conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabla}_{col} ON {tabla}({col})")
+        except: pass
+
 def proceso_descarga(config, es_reintento=False):
     if es_reintento: print("\n--- 🔄 INICIANDO FASE DE RECUPERACIÓN (RE-DESCARGA) ---")
-    else: print("\n--- INICIANDO FASE 1: DESCARGA DE ARCHIVOS ---")
+    else: print("\n--- INICIANDO FASE 1: DESCARGA DE ARCHIVOS (PARALELA) ---")
     
     usuario = config['usuario']
     password = config['password']
@@ -268,14 +349,15 @@ def proceso_descarga(config, es_reintento=False):
     lista_archivos = config['archivos_descarga'] 
     dias_permitidos, meses_permitidos = generar_fechas_permitidas(fecha_ini, fecha_fin)
 
+    print("   🔎 Buscando archivos en el servidor...")
+    tareas_descarga = [] 
+    
     try:
-        ftps = conectar_ftps(usuario, password)
-        if not es_reintento: print("✅ ¡Conexión FTP Exitosa!")
+        ftps = make_ftps_connection(usuario, password)
     except Exception as e:
-        print(f"❌ No se pudo conectar: {e}")
+        print(f"❌ No se pudo conectar para listar: {e}")
         return
 
-    archivos_bajados = 0
     mapa_archivos = {} 
     for item in lista_archivos:
         r = item['ruta_remota']
@@ -310,36 +392,45 @@ def proceso_descarga(config, es_reintento=False):
                 if es_mensual:
                     patron_esperado = f"{nombre_base}{mes_actual_str}".lower()
                     for f in archivos_en_servidor:
-                        if os.path.basename(f).lower().startswith(patron_esperado): coincidencias.append(f)
+                        if os.path.basename(f).lower().startswith(patron_esperado): coincidencias.append(f"{ruta_final}/{f}")
                 else:
                     for f in archivos_en_servidor:
                         nombre_archivo = os.path.basename(f).lower()
                         if not nombre_archivo.startswith(nombre_base_lower): continue
                         for dia in dias_permitidos:
                             if dia in nombre_archivo:
-                                coincidencias.append(f)
+                                coincidencias.append(f"{ruta_final}/{f}")
                                 break 
-                for archivo in coincidencias:
-                    nombre_limpio = os.path.basename(archivo)
+                
+                for archivo_full in coincidencias:
+                    nombre_limpio = os.path.basename(archivo_full)
                     ruta_destino = os.path.join(ruta_local_mes, nombre_limpio)
                     if os.path.exists(ruta_destino) and os.path.getsize(ruta_destino) > 0: continue 
-                    
-                    if es_reintento: print(f"   🔄 Restaurando: {nombre_limpio}")
-                    else: print(f"   ⬇️ Descargando: {nombre_limpio}")
-                    try:
-                        with open(ruta_destino, "wb") as local_file:
-                            ftps.retrbinary(f"RETR {archivo}", local_file.write)
-                        if os.path.getsize(ruta_destino) == 0:
-                            os.remove(ruta_destino)
-                        else: archivos_bajados += 1
-                    except Exception as e:
-                        if os.path.exists(ruta_destino):
-                            try: os.remove(ruta_destino)
-                            except: pass
+                    tareas_descarga.append((archivo_full, ruta_destino))
+
     try: ftps.quit()
     except: pass
-    if es_reintento: print(f"✅ RECUPERACIÓN TERMINADA: {archivos_bajados} archivos.")
-    else: print(f"✅ FASE 1 TERMINADA.")
+    
+    total_archivos = len(tareas_descarga)
+    if total_archivos == 0:
+        print("✅ Todo actualizado.")
+        return
+
+    print(f"   ⬇️ Iniciando descarga de {total_archivos} archivos...")
+    resultados = descargar_archivos_paralelo(config, tareas_descarga, workers=DEFAULT_WORKERS)
+    
+    errores = [r for r in resultados if r[1] is not None]
+    exitos = len(resultados) - len(errores)
+    
+    print(f"      ✅ Éxitos: {exitos}")
+    if errores:
+        print(f"      ❌ Errores: {len(errores)}")
+        for path, err in errores[:5]:
+            print(f"         - {os.path.basename(str(path))}: {err}")
+
+# =============================================================================
+#  MÓDULO 1: LÓGICA DE NEGOCIO
+# =============================================================================
 
 def extraer_info_nombre(nombre_archivo):
     nombre_base, extension = os.path.splitext(nombre_archivo)
@@ -378,7 +469,7 @@ def cargar_cache_archivos_existentes(cursor):
 
 def proceso_base_datos(config, es_reintento=False):
     if es_reintento: print("\n--- 🔄 INICIANDO FASE DE PROCESAMIENTO (INTENTO #2) ---")
-    else: print("\n--- INICIANDO FASE 2: ACTUALIZACIÓN DE BASE DE DATOS ---")
+    else: print("\n--- INICIANDO FASE 2: ACTUALIZACIÓN DE BASE DE DATOS (OPTIMIZADA) ---")
     ruta_descargas = config['ruta_local']
     ruta_db_completa = os.path.join(ruta_descargas, NOMBRE_DB_FILE)
     try:
@@ -387,8 +478,9 @@ def proceso_base_datos(config, es_reintento=False):
     except: return False
     dias_permitidos, meses_permitidos = generar_fechas_permitidas(fecha_ini, fecha_fin)
     
-    print(f"🔌 Conectando a BD: {ruta_db_completa}")
-    conn = sqlite3.connect(ruta_db_completa)
+    print(f"🔌 Conectando a BD (Fast Mode): {ruta_db_completa}")
+    # Usar conexión optimizada
+    conn = sqlite_fast_connect(ruta_db_completa)
     cursor = conn.cursor()
     archivos_procesados_cache = cargar_cache_archivos_existentes(cursor)
     
@@ -398,6 +490,8 @@ def proceso_base_datos(config, es_reintento=False):
     print(f"   🔍 Se encontraron {len(archivos)} archivos. Filtrando...")
 
     corruptos_eliminados = 0
+    tablas_tocadas = set()
+
     for ruta_completa in archivos:
         nombre_archivo = os.path.basename(ruta_completa)
         if nombre_archivo in archivos_procesados_cache: continue
@@ -410,41 +504,57 @@ def proceso_base_datos(config, es_reintento=False):
             if fecha_identificador in dias_permitidos: es_valido = True
         if not es_valido: continue
 
+        # Validación preliminar ligera
         archivo_corrupto = False
         razon = ""
-        if os.path.getsize(ruta_completa) == 0:
+        size_bytes = os.path.getsize(ruta_completa)
+        if size_bytes == 0:
             archivo_corrupto = True; razon = "0 bytes"
-        if not archivo_corrupto:
-            try: pd.read_csv(ruta_completa, sep=';', nrows=1, encoding='latin-1', on_bad_lines='skip', engine='python')
-            except pd.errors.EmptyDataError: archivo_corrupto = True; razon = "Vacío"
-            except: pass
-
+        
         if archivo_corrupto:
             print(f"   🗑️ Corrupto ({razon}): {nombre_archivo} -> ELIMINADO")
             try: os.remove(ruta_completa)
             except: pass
-            time.sleep(0.1)
             corruptos_eliminados += 1
             continue
             
         try:
-            df = pd.read_csv(ruta_completa, sep=';', decimal='.', encoding='latin-1', on_bad_lines='skip', engine='python')
-            if df.empty: raise Exception("DF Vacío")
-            df.columns = df.columns.str.strip().str.replace(' ', '_').str.lower()
-            df['origen_archivo'] = nombre_archivo
-            df['anio'] = anio_carpeta
-            df['mes_dia'] = fecha_identificador
-            df['version_dato'] = version
-            df['fecha_carga'] = pd.Timestamp.now()
-            df.to_sql(nombre_tabla, conn, if_exists='append', index=False)
-            archivos_procesados_cache.add(nombre_archivo) 
-            print(f"   💾 Guardado: {nombre_archivo}")
+            # Metadata a inyectar
+            meta = {
+                'origen_archivo': nombre_archivo,
+                'anio': anio_carpeta,
+                'mes_dia': fecha_identificador,
+                'version_dato': version,
+                'fecha_carga': str(pd.Timestamp.now())
+            }
+            
+            # Insertar en chunks
+            rows = bulk_insert_chunked(conn, ruta_completa, nombre_tabla, meta, chunksize=50000)
+            
+            if rows > 0:
+                archivos_procesados_cache.add(nombre_archivo)
+                tablas_tocadas.add(nombre_tabla)
+                print(f"   💾 Guardado ({rows} filas): {nombre_archivo}")
+            else:
+                # Si no se insertó nada (pero no falló), asumimos vacío
+                raise Exception("Archivo vacío o sin datos válidos")
+                
         except Exception as e:
-            if "DF Vacío" in str(e):
+            # Detectar archivos vacíos o corruptos
+            if "No columns to parse" in str(e) or "registros" in str(e).lower() or "vacío" in str(e).lower():
+                print(f"   🗑️ Archivo vacío detectado: {nombre_archivo}")
                 try: os.remove(ruta_completa)
                 except: pass
                 corruptos_eliminados += 1
-            else: print(f"   ⚠️ Error leyendo {nombre_archivo}: {e}")
+            else:
+                print(f"   ⚠️ Error leyendo {nombre_archivo}: {e}")
+
+    # Finalizar: Crear índices en tablas afectadas
+    if tablas_tocadas:
+        print("   🔨 Optimizando índices...")
+        for t in tablas_tocadas:
+            ensure_indexes(conn, t, ['anio', 'mes_dia', 'version_dato', 'origen_archivo'])
+            
     conn.close()
     print(f"✅ FASE {'2' if not es_reintento else 'RECUPERACIÓN'} TERMINADA.")
     if corruptos_eliminados > 0: return True 
