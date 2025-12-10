@@ -1632,7 +1632,8 @@ class AplicacionXM:
         # Vamos a intentar la implementación de Canvas Wrapper SIMPLE.
         
         inner_frame = tk.Frame(canvas, bg=bg_card)
-        win_id = canvas.create_window(0, 0, window=inner_frame, anchor="nw")
+        # Position at 10,10 to avoid covering rounded corners (radius 15) with rectangular frame
+        win_id = canvas.create_window(10, 10, window=inner_frame, anchor="nw")
         
         def on_config_canvas(e):
             # No re-configurar el window aqui para evitar loop infinito si cambiamos height del canvas
@@ -1640,7 +1641,7 @@ class AplicacionXM:
             self.round_rectangle(canvas, 1, 1, e.width-1, e.height-1, radius=15, outline=border_color, width=1, fill=bg_card, tags="bg_rect")
             canvas.tag_lower("bg_rect")
             # Ajustar tamano del window interno
-            canvas.itemconfig(win_id, width=e.width-20, height=e.height-20)
+            canvas.itemconfig(win_id, width=e.width-20)
 
         canvas.bind("<Configure>", on_config_canvas)
         
@@ -1746,124 +1747,6 @@ class AplicacionXM:
         
         return canvas
 
-    def crear_tab_general_deprecated(self):
-        # -- CONTENEDOR PRINCIPAL (Fondo Gris Web) --
-        self.tab_general.configure(bg="#f4f6f7") 
-        
-        main_container = tk.Frame(self.tab_general, bg="#f4f6f7")
-        main_container.pack(fill="both", expand=True, padx=20, pady=15) # Reduced from 30
-
-        # =========================================================
-        # SECCIÓN 1: TARJETAS DE CONFIGURACIÓN (APILADAS)
-        # =========================================================
-        
-        # --- TARJETA 1: CREDENCIALES (FULL WIDTH) ---
-        fr_card_creds = tk.Frame(main_container, bg="#f4f6f7")
-        fr_card_creds.pack(fill="x", pady=(0, 10)) # Reduced from 20
-        
-        c1_border, c1_content = self.create_card(fr_card_creds, "Credenciales FTP y Rutas", "🗄️")
-        c1_border.pack(fill="both", expand=True)
-
-        # Configurar Grid de la tarjeta Credenciales
-        # Row 0: Labels Usuario / Password
-        # Row 1: Inputs Usuario / Password
-        # Row 2: Label Ruta
-        # Row 3: Ruta Input + Icono
-        
-        c1_content.columnconfigure(0, weight=1)
-        c1_content.columnconfigure(1, weight=1) # 2 columnas para user/pass
-
-        # Helper para labels e inputs limpios
-        def add_label(parent, text, r, c):
-            tk.Label(parent, text=text, bg="#ffffff", fg="#374151", font=("Segoe UI", 9)).grid(row=r, column=c, sticky="w", pady=(2, 2), padx=(0, 10))
-
-        # USER / PASS (Side by Side)
-        add_label(c1_content, "Usuario FTP", 0, 0)
-        c_user, self.ent_user = self.create_rounded_entry(c1_content)
-        c_user.grid(row=1, column=0, sticky="ew", padx=(0, 20), pady=(0, 5))
-        self.ent_user.insert(0, self.config.get('usuario', ''))
-
-        add_label(c1_content, "Password FTP", 0, 1)
-        c_pass, self.ent_pass = self.create_rounded_entry(c1_content)
-        c_pass.grid(row=1, column=1, sticky="ew", pady=(0, 5))
-        self.ent_pass.config(show="●", font=("Segoe UI", 10)) # Apply show/font to inner entry
-        self.ent_pass.insert(0, self.config.get('password', ''))
-
-        # RUTA LOCAL (Full Width abajo)
-        add_label(c1_content, "Ruta Local", 2, 0)
-        fr_ruta = tk.Frame(c1_content, bg="#ffffff")
-        fr_ruta.grid(row=3, column=0, columnspan=2, sticky="ew")
-        
-        c_ruta, self.ent_ruta = self.create_rounded_entry(fr_ruta)
-        c_ruta.pack(side="left", fill="x", expand=True)
-        self.ent_ruta.insert(0, self.config.get('ruta_local', ''))
-        
-        # Boton Folder (Rounded small)
-        self.btn_fold = self.create_rounded_button(fr_ruta, "📂", color_bg="#f3f4f6", width=40, command=self.seleccionar_carpeta)
-        # Note: Canvas button has standard text color 'white'. For light bg need black text.
-        # My helper hardcodes white text. I should modify helper or use dark bg button.
-        # Let's keep it consistent, maybe blue folder button? Or update helper?
-        # Let's use blue for consistency:
-        self.btn_fold = self.create_rounded_button(fr_ruta, "📂", color_bg="#0093d0", width=40, command=self.seleccionar_carpeta)
-        self.btn_fold.pack(side="left", padx=(5, 0))
-
-
-        # --- TARJETA 2: FECHAS (FULL WIDTH) ---
-        fr_card_dates = tk.Frame(main_container, bg="#f4f6f7")
-        fr_card_dates.pack(fill="x", pady=(0, 10)) # Reduced from 20
-        
-        c2_border, c2_content = self.create_card(fr_card_dates, "Rango de Fechas (YYYY-MM-DD)", "📅")
-        c2_border.pack(fill="both", expand=True)
-        
-        c2_content.columnconfigure(0, weight=1)
-        c2_content.columnconfigure(1, weight=1)
-        
-        add_label(c2_content, "Fecha Inicio", 0, 0)
-        c_ini, self.ent_ini = self.create_rounded_entry(c2_content)
-        c_ini.grid(row=1, column=0, sticky="ew", padx=(0, 20))
-        self.ent_ini.insert(0, self.config.get('fecha_ini', '2025-01-01'))
-        
-        add_label(c2_content, "Fecha Fin", 0, 1)
-        c_fin, self.ent_fin = self.create_rounded_entry(c2_content)
-        c_fin.grid(row=1, column=1, sticky="ew")
-        self.ent_fin.insert(0, self.config.get('fecha_fin', '2025-01-31'))
-
-
-        # =========================================================
-        # SECCIÓN 2: BOTONES DE ACCIÓN (Action Bar)
-        # =========================================================
-        # className="grid grid-cols-3 gap-4"
-        row_actions = tk.Frame(main_container, bg="#f4f6f7")
-        row_actions.pack(fill="x", pady=(0, 10)) # Reduced from 20
-        
-        # Configure Grid for uniform width
-        row_actions.columnconfigure(0, weight=1, uniform="btn_group")
-        row_actions.columnconfigure(1, weight=1, uniform="btn_group")
-        row_actions.columnconfigure(2, weight=1, uniform="btn_group")
-        
-        def create_action_btn(parent, text, icon, color, command):
-            # Map color string to hex
-            c_hex = "#8cc63f" if color == "green" else "#0093d0"
-            return self.create_rounded_button(parent, text, icon, color_bg=c_hex, command=command)
-
-        self.btn_guardar = create_action_btn(row_actions, "Guardar Config", "💾", "green", self.guardar_config)
-        self.btn_guardar.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-
-        self.btn_descargar = create_action_btn(row_actions, "EJECUTAR DESCARGA", " ▶️", "blue", self.run_descarga)
-        self.btn_descargar.grid(row=0, column=1, sticky="ew", padx=(0, 10))
-        
-        self.btn_reporte = create_action_btn(row_actions, "GENERAR REPORTE", "📊", "blue", self.run_reporte)
-        self.btn_reporte.grid(row=0, column=2, sticky="ew", padx=(0, 0))
-
-
-        # =========================================================
-        # SECCIÓN 3: DASHBOARD (Container para el layout de actualizar_dashboard)
-        # =========================================================
-        self.frame_dashboard = tk.Frame(main_container, bg="#f4f6f7")
-        self.frame_dashboard.pack(fill="both", expand=True)
-
-        # self.actualizar_dashboard() # MOVIDO A __INIT__ PARA EVITAR ERROR
-
     def crear_tab_general(self):
         # -- CONTENEDOR PRINCIPAL --
         self.tab_general.configure(bg="#f4f6f7") 
@@ -1886,7 +1769,7 @@ class AplicacionXM:
         c_content.columnconfigure(1, weight=1)
 
         # -- SUB-SECCIÓN: CREDENCIALES --
-        tk.Label(c_content, text="Credenciales FTP y Rutas", bg="#ffffff", fg="#0093d0", font=("Segoe UI", 10)).grid(row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 10))
+        tk.Label(c_content, text="Credenciales FTP y Rutas", bg="#ffffff", fg="#0093d0", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 10))
 
         # Helper para labels
         def add_label(parent, text, r, c):
