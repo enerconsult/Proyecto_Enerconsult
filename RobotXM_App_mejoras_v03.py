@@ -41,8 +41,13 @@ import matplotlib.ticker as ticker
 try:
     from PIL import Image, ImageTk
     TIENE_PILLOW = True
+    # compatibilidad: Image.Resampling existe en Pillow >= 9.1.0
+    RESAMPLE_LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
 except ImportError:
     TIENE_PILLOW = False
+    RESAMPLE_LANCZOS = None
+except Exception:
+    RESAMPLE_LANCZOS = None
 
 # Silenciar advertencias
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
@@ -123,75 +128,109 @@ class PrintRedirector:
 #  NUEVA CLASE: DROPDOWN CON TOOLTIP (Integración solicitada)
 # =============================================================================
 class CustomDropdownWithTooltip:
-    def __init__(self, master, textvariable=None, width=18, command=None):
+    """Dropdown searchable con tooltip para items largos.
+    Mejoras:
+      - Corrige errores de width/variables no definidas.
+      - Inicializa atributos (listbox).
+      - Maneja Escape y FocusOut para cerrar dropdown.
+      - No depender de overrideredirect exclusivamente (pero permite usarlo).
+    Uso:
+      cb = CustomDropdownWithTooltip(parent, textvariable=var, width=25, command=callback)
+      cb.entry.grid(...)  # el Entry es el widget visible
+      cb.update_items(['A','B', ...])
+    """
+    def __init__(self, master, textvariable=None, width=18, command=None, tooltip_threshold=15, dropdown_height=160):
         self.master = master
         self.items = []
         self.filtered_items = []
         self.textvariable = textvariable
-        self.command = command # Callback opcional al seleccionar
-        
-        # Usamos ttk.Entry para mantener el estilo del resto de la app
-        self.entry = ttk.Entry(master, width=width, textvariable=self.textvariable)
-        # Nota: No hacemos pack/grid aquí, dejamos que el padre lo haga
-        
-        # Bindings
-        self.entry.bind("<Button-1>", self.show_dropdown)
-        self.entry.bind("<KeyRelease>", self.filter_items) 
-        self.entry.bind("<Down>", self.focus_listbox)
+        self.command = command
+        self.tooltip_threshold = tooltip_threshold
+        self.dropdown_height = dropdown_height
 
+        self.entry = ttk.Entry(master, width=width, textvariable=self.textvariable)
+        self.entry.bind("<Button-1>", self.show_dropdown)
+        self.entry.bind("<KeyRelease>", self.filter_items)
+        self.entry.bind("<Down>", self.focus_listbox)
+        self.entry.bind("<Escape>", lambda e: self.close_dropdown())
+
+        # initialize attributes
         self.dropdown = None
         self.tooltip = None
+        self.listbox = None
         self.current_index = None
 
-    def focus_listbox(self, event):
-        if not self.dropdown: self.show_dropdown()
-        if self.listbox: self.listbox.focus_set()
+    def focus_listbox(self, event=None):
+        if not self.dropdown:
+            self.show_dropdown()
+        if self.listbox:
+            self.listbox.focus_set()
+            # ensure selection visible
+            if self.listbox.size() > 0:
+                self.listbox.selection_clear(0, tk.END)
+                self.listbox.selection_set(0)
+                self.listbox.activate(0)
 
     def update_items(self, new_items):
-        """Actualiza la lista de items dinámicamente desde la BD"""
-        self.items = [str(x) for x in new_items] # Asegurar strings
+        self.items = [str(x) for x in new_items]
         self.filtered_items = self.items[:]
 
-
     def show_dropdown(self, event=None):
+        # toggle
         if self.dropdown:
-            self.dropdown.destroy()
-            self.dropdown = None
+            self.close_dropdown()
             return
 
+        # create dropdown Toplevel
         self.dropdown = tk.Toplevel(self.master)
-        self.dropdown.wm_overrideredirect(True)
-        
-        # Calcular posición
+        # Use transient and topmost to avoid some overrideredirect issues
+        try:
+            self.dropdown.wm_overrideredirect(True)
+            self.dropdown.attributes("-topmost", True)
+        except Exception:
+            # fallback for platforms that don't support attributes
+            pass
+
+        # compute position relative to entry
         x = self.entry.winfo_rootx()
         y = self.entry.winfo_rooty() + self.entry.winfo_height()
-        
-        # Ancho del dropdown igual al del entry
-        w = self.entry.winfo_width()
-        self.dropdown.geometry(f"{w}x150+{x}+{y}") # Altura fija o dinámica
+        w_pixels = max(self.entry.winfo_width(), 150)
 
-        # Scrollbar y Listbox
-        frame_list = tk.Frame(self.dropdown)
+        # geometry: width x height + x + y
+        height = self.dropdown_height
+        self.dropdown.geometry(f"{w_pixels}x{height}+{x}+{y}")
+
+        # frame + scrollbar + listbox
+        frame_list = tk.Frame(self.dropdown, bd=0)
         frame_list.pack(fill="both", expand=True)
-        
+
         scrollbar = tk.Scrollbar(frame_list, orient="vertical")
         scrollbar.pack(side="right", fill="y")
-        # Color corporate match
-        self.listbox = tk.Listbox(frame_list, width=width_chars(w), height=8, yscrollcommand=scrollbar.set, exportselection=False,
-                                  bg="#ffffff", fg="#2c3e50", selectbackground="#0093d0", selectforeground="#ffffff", font=("Segoe UI", 10), borderwidth=0)
-        self.listbox.pack(side="left", fill="both", expand=True)
 
+        chars_w = width_chars(w_pixels)
+        self.listbox = tk.Listbox(frame_list, width=chars_w, height=8, yscrollcommand=scrollbar.set,
+                                  exportselection=False, bg="#ffffff", fg="#2c3e50",
+                                  selectbackground="#0093d0", selectforeground="#ffffff",
+                                  font=("Segoe UI", 10), borderwidth=0)
+        self.listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self.listbox.yview)
+
+        # populate
+        self.listbox.delete(0, tk.END)
         for item in self.filtered_items:
             self.listbox.insert(tk.END, item)
 
+        # bindings
         self.listbox.bind("<Motion>", self.on_motion)
         self.listbox.bind("<Leave>", self.hide_tooltip)
         self.listbox.bind("<ButtonRelease-1>", self.select_item)
+        self.listbox.bind("<Escape>", lambda e: self.close_dropdown())
         self.dropdown.bind("<FocusOut>", lambda e: self.close_dropdown())
 
     def on_motion(self, event):
+        if not self.listbox:
+            return
         index = self.listbox.nearest(event.y)
-        # Verificar que el índice sea válido
         if index >= 0 and index < self.listbox.size():
             if index != self.current_index:
                 self.current_index = index
@@ -199,19 +238,24 @@ class CustomDropdownWithTooltip:
 
     def show_tooltip(self, index, event):
         self.hide_tooltip()
-        text = self.listbox.get(index)
-        
-        # Solo mostrar tooltip si el texto es largo
-        if len(text) < 15: return 
+        try:
+            text = self.listbox.get(index)
+        except Exception:
+            return
+        if len(text) < self.tooltip_threshold:
+            return
 
         x = event.x_root + 20
         y = event.y_root + 10
-        
+
         self.tooltip = tk.Toplevel(self.master)
-        self.tooltip.wm_overrideredirect(True)
-        self.tooltip.wm_geometry(f"+{x}+{y}")
-        self.tooltip.attributes("-topmost", True) # Asegurar que esté encima
-        
+        try:
+            self.tooltip.wm_overrideredirect(True)
+            self.tooltip.attributes("-topmost", True)
+        except:
+            pass
+        # position
+        self.tooltip.geometry(f"+{x}+{y}")
         label = tk.Label(self.tooltip, text=text, background="#ffffe0",
                          relief="solid", borderwidth=1,
                          font=("Arial", "9", "normal"), padx=5, pady=2)
@@ -219,10 +263,15 @@ class CustomDropdownWithTooltip:
 
     def hide_tooltip(self, event=None):
         if self.tooltip:
-            self.tooltip.destroy()
+            try:
+                self.tooltip.destroy()
+            except Exception:
+                pass
             self.tooltip = None
 
-    def select_item(self, event):
+    def select_item(self, event=None):
+        if not self.listbox:
+            return
         selection = self.listbox.curselection()
         if selection:
             index = selection[0]
@@ -233,36 +282,88 @@ class CustomDropdownWithTooltip:
                 self.entry.delete(0, tk.END)
                 self.entry.insert(0, val)
         self.close_dropdown()
-        if self.command: # Ejecutar callback si existe
-            try: self.command(None)
-            except: pass
+        if self.command:
+            try:
+                self.command(None)
+            except Exception:
+                pass
 
     def close_dropdown(self):
         self.hide_tooltip()
         if self.dropdown:
-            self.dropdown.destroy()
+            try:
+                self.dropdown.destroy()
+            except Exception:
+                pass
             self.dropdown = None
+            self.listbox = None
             self.current_index = None
 
     def filter_items(self, event):
-        # Filtrar items basado en lo escrito
-        if event.keysym in ['Down', 'Up', 'Return']: return # Ignorar navegación
-        
+        if event.keysym in ['Down', 'Up', 'Return', 'Escape']:
+            return
+
         query = self.entry.get().lower()
         self.filtered_items = [item for item in self.items if query in item.lower()]
-        
-        # Si el dropdown ya está abierto, actualizarlo
-        if self.dropdown:
+
+        if self.dropdown and self.listbox:
+            # update listbox
             self.listbox.delete(0, tk.END)
             for item in self.filtered_items:
                 self.listbox.insert(tk.END, item)
         else:
-            # Si no está abierto y hay texto, abrirlo
-            self.show_dropdown()
+            if query:
+                # show only if there's a query (prevents immediate dropdown on focus)
+                self.show_dropdown()
+
 
 def width_chars(pixels):
     # Estimación aproximada de caracteres basado en pixeles (depende de la fuente)
     return int(pixels / 7)
+
+# ======================
+# Card (simple, ttk-based)
+# ======================
+class Card(ttk.Frame):
+    """Card visual simple usando ttk.Frame y padding.
+    No pretende dibujar esquinas redondeadas, pero brinda un contenedor consistente,
+    con header opcional.
+    """
+    def __init__(self, parent, title=None, icon=None, *args, **kwargs):
+        super().__init__(parent, style="Card.TFrame", padding=(10, 8))
+        # crear header si corresponde
+        if title or icon:
+            header = ttk.Frame(self, style="CardHeader.TFrame")
+            header.pack(fill="x", pady=(0, 6))
+            if icon:
+                lbl_icon = ttk.Label(header, text=icon, style="CardIcon.TLabel")
+                lbl_icon.pack(side="left", padx=(0, 8))
+            if title:
+                lbl_title = ttk.Label(header, text=title, style="CardTitle.TLabel")
+                lbl_title.pack(side="left")
+
+        # body: donde el usuario pone widgets
+        self.body = ttk.Frame(self, style="CardBody.TFrame")
+        self.body.pack(fill="both", expand=True)
+
+    def get_body(self):
+        return self.body
+
+# ======================
+# RoundedButtonWrapper (usa ttk.Button + estilo)
+# ======================
+class RoundedButtonWrapper(ttk.Button):
+    """Pequeña envoltura para crear un botón con estilo ya definido en 'configurar_estilos_modernos'.
+    Llamar con style='Primary.TButton' o 'Success.TButton' etc.
+    """
+    def __init__(self, parent, text, command=None, style="Primary.TButton", width=None, *args, **kwargs):
+        super().__init__(parent, text=text, command=command, style=style, *args, **kwargs)
+        if width:
+            try:
+                self.configure(width=width)
+            except Exception:
+                pass
+
 
 # --- IMPORTS ADICIONALES PARA RED ---
 # (Ya importados al inicio)
@@ -302,8 +403,7 @@ def make_ftps_connection(usuario, password):
         raise Exception(f"Fallo conexión FTP: {e}")
     return ftps
 
-def conectar_ftps(usuario, password):
-    return make_ftps_connection(usuario, password)
+
 
 def retrbinary_safe(ftps, cmd, callback, blocksize=8192):
     attempts = 0
@@ -1367,16 +1467,19 @@ class AplicacionXM:
         self.construir_encabezado_logo()
 
         tab_control = ttk.Notebook(root)
-        self.tab_general = ttk.Frame(tab_control)
-        self.tab_archivos = ttk.Frame(tab_control)
-        self.tab_filtros = ttk.Frame(tab_control)
-        self.tab_visualizador = ttk.Frame(tab_control)
+        self.tab_general = tk.Frame(tab_control, bg="#f4f6f7")
+        self.tab_archivos = tk.Frame(tab_control, bg="#f4f6f7")
+        self.tab_filtros = tk.Frame(tab_control, bg="#f4f6f7")
+        self.tab_visualizador = tk.Frame(tab_control, bg="#f4f6f7")
         
+        # Iconos originales restaurados
         tab_control.add(self.tab_general, text='🔧 Configuración')
         tab_control.add(self.tab_archivos, text='📥 Descargas')
         tab_control.add(self.tab_filtros, text='📋 Filtros Reporte')
         tab_control.add(self.tab_visualizador, text='📈 Visualizador')
         
+        # Eliminar bordes del Notebook container para look "clean"
+        # Esto requiere soporte en configurar_estilos_modernos (Ver paso siguiente)
         tab_control.pack(expand=1, fill="both", padx=10, pady=5)
 
         self.crear_tab_general()
@@ -1386,8 +1489,8 @@ class AplicacionXM:
         # --- PASAMOS LA CONFIG AL VISUALIZADOR ---
         self.app_visualizador = ModuloVisualizador(self.tab_visualizador, self.config)
 
-        lbl_consola = ttk.Label(root, text="Monitor de Ejecución:")
-        lbl_consola.pack(anchor="w", padx=10)
+        # Monitor (Estilo minimalista)
+        tk.Label(root, text=">_ Monitor de Ejecución", font=("Segoe UI", 9, "bold"), fg="#374151").pack(anchor="w", padx=15, pady=(5,0))
         self.txt_console = scrolledtext.ScrolledText(root, height=8, state='disabled', bg='black', fg='#00FF00', font=('Consolas', 9))
         self.txt_console.pack(fill="both", expand=False, padx=10, pady=5)
         sys.stdout = PrintRedirector(self.txt_console)
@@ -1436,6 +1539,27 @@ class AplicacionXM:
                 return False
         return True
 
+    def add_placeholder(self, entry, text):
+        """Agrega comportamiento de placeholder a un Entry"""
+        entry.insert(0, text)
+        try: entry.configure(foreground="#95a5a6") # Gris placeholder
+        except: pass
+        
+        def on_focus_in(event):
+            if entry.get() == text:
+                entry.delete(0, tk.END)
+                try: entry.configure(foreground="#2c3e50") # Color normal
+                except: pass
+        
+        def on_focus_out(event):
+            if not entry.get():
+                entry.insert(0, text)
+                try: entry.configure(foreground="#95a5a6")
+                except: pass
+        
+        entry.bind("<FocusIn>", on_focus_in)
+        entry.bind("<FocusOut>", on_focus_out)
+
     def configurar_estilos_modernos(self):
         style = ttk.Style()
         style.theme_use('clam')
@@ -1462,12 +1586,13 @@ class AplicacionXM:
         style.configure("TLabelframe.Label", background=c_fondo, foreground=c_azul_corp, font=f_title)
         
         # --- PESTAÑAS (NOTEBOOK) MODERNAS ---
-        style.configure("TNotebook", background=c_fondo, borderwidth=0)
-        style.configure("TNotebook.Tab", padding=[15, 8], font=f_head, background=c_gris_claro, foreground="#7f8c8d", borderwidth=0)
+        # borderwidth=0 y relief='flat' para eliminar bordes
+        style.configure("TNotebook", background=c_fondo, borderwidth=0, tabmargins=[0, 0, 0, 0], relief="flat")
+        style.configure("TNotebook.Tab", padding=[15, 8], font=f_head, background=c_gris_claro, foreground="#7f8c8d", borderwidth=0, relief="flat")
         style.map("TNotebook.Tab", 
             background=[("selected", c_blanco), ("active", "#dfe6e9")],
             foreground=[("selected", c_azul_corp), ("active", c_azul_corp)],
-            expand=[("selected", [1, 1, 1, 0])] # Efecto "conectado" con el contenido
+            expand=[("selected", [0, 0, 0, 0])] # Eliminar expansión visual de borde
         )
 
         # --- BOTONES MODERNOS ---
@@ -1504,6 +1629,13 @@ class AplicacionXM:
         # --- SCROLLBAR ---
         style.configure("Vertical.TScrollbar", background=c_gris_claro, troughcolor=c_fondo, borderwidth=0, arrowsize=12)
 
+        # --- CARD STYLES (RECOMENDADOS) ---
+        style.configure("Card.TFrame", background=c_blanco, relief="flat")
+        style.configure("CardHeader.TFrame", background=c_blanco)
+        style.configure("CardTitle.TLabel", font=("Segoe UI Semibold", 11), background=c_blanco, foreground=c_azul_corp)
+        style.configure("CardIcon.TLabel", background=c_blanco)
+        style.configure("CardBody.TFrame", background=c_blanco)
+
     def construir_encabezado_logo(self):
         frame_header = tk.Frame(self.root, bg="white", height=100)
         frame_header.pack(fill="x", side="top")
@@ -1522,121 +1654,290 @@ class AplicacionXM:
                 lbl_logo.pack(pady=10)
             except Exception as e: print(f"⚠️ Error logo: {e}")
 
-    def crear_tab_general(self):
-        fr = ttk.LabelFrame(self.tab_general, text="Credenciales FTP y Rutas")
-        fr.pack(fill="x", padx=10, pady=10)
-        
-        ttk.Label(fr, text="Usuario FTP:").grid(row=0, column=0, padx=5, pady=10)
-        self.ent_user = ttk.Entry(fr); self.ent_user.grid(row=0, column=1, padx=5)
-        self.ent_user.insert(0, self.config.get('usuario', ''))
-        
-        ttk.Label(fr, text="Password FTP:").grid(row=0, column=2, padx=5)
-        self.ent_pass = ttk.Entry(fr, show="*"); self.ent_pass.grid(row=0, column=3, padx=5)
-        self.ent_pass.insert(0, self.config.get('password', ''))
-        
-        ttk.Label(fr, text="Ruta Local:").grid(row=1, column=0, padx=5)
-        self.ent_ruta = ttk.Entry(fr, width=50); self.ent_ruta.grid(row=1, column=1, columnspan=2, padx=5)
-        self.ent_ruta.insert(0, self.config.get('ruta_local', ''))
-        ttk.Button(fr, text="📂", command=self.seleccionar_carpeta).grid(row=1, column=3, padx=5, pady=10)
+    # --- MÉTODOS VISUALES LEGACY ELIMINADOS (v03 utiliza ttk + estilos) ---
+    def create_styled_label(self, parent, text, font=("Segoe UI Semibold", 9)):
+         return ttk.Label(parent, text=text, font=font, background="#ffffff")
+    
+    # create_card, create_rounded_button, create_rounded_entry, round_rectangle fueron removidos
+    # en favor de componentes ttk nativos.
 
-        fr_f = ttk.LabelFrame(self.tab_general, text="Rango de Fechas (YYYY-MM-DD)")
-        fr_f.pack(fill="x", padx=10, pady=5)
-        ttk.Label(fr_f, text="Inicio:").grid(row=0, column=0, padx=5)
-        self.ent_ini = ttk.Entry(fr_f); self.ent_ini.grid(row=0, column=1, padx=5)
+
+    def crear_tab_general(self):
+        # -- CONTENEDOR PRINCIPAL --
+        self.tab_general.configure(bg="#f4f6f7") 
+        
+        main_container = tk.Frame(self.tab_general, bg="#f4f6f7")
+        main_container.pack(fill="both", expand=True, padx=20, pady=10) # Minimal padding
+
+        # =========================================================
+        # SECCIÓN 1: TARJETA ÚNICA DE CONFIGURACIÓN
+        # =========================================================
+        
+        card_main = Card(main_container)
+        card_main.pack(fill="x", pady=(0, 10))
+        c_content = card_main.get_body()
+        
+        # Grid Configuration
+        c_content.columnconfigure(0, weight=1)
+        c_content.columnconfigure(1, weight=1)
+
+        # -- SUB-SECCIÓN: CREDENCIALES --
+        ttk.Label(c_content, text="Credenciales FTP y Rutas", font=("Segoe UI", 12, "bold"), foreground="#0093d0", background="#ffffff").grid(row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 10))
+
+        # Usuario
+        ttk.Label(c_content, text="Usuario FTP", background="#ffffff").grid(row=1, column=0, sticky="w", pady=(2, 2), padx=(0, 10))
+        self.ent_user = ttk.Entry(c_content)
+        self.ent_user.grid(row=2, column=0, sticky="ew", padx=(0, 20), pady=(0, 5))
+        self.ent_user.insert(0, self.config.get('usuario', ''))
+
+        # Password
+        ttk.Label(c_content, text="Password FTP", background="#ffffff").grid(row=1, column=1, sticky="w", pady=(2, 2), padx=(0, 10))
+        self.ent_pass = ttk.Entry(c_content, show="*")
+        self.ent_pass.grid(row=2, column=1, sticky="ew", pady=(0, 5))
+        self.ent_pass.insert(0, self.config.get('password', ''))
+
+        # Ruta
+        ttk.Label(c_content, text="Ruta Local", background="#ffffff").grid(row=3, column=0, sticky="w", pady=(2, 2), padx=(0, 10))
+        fr_ruta = tk.Frame(c_content, bg="#ffffff")
+        fr_ruta.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 10)) 
+        
+        self.ent_ruta = ttk.Entry(fr_ruta)
+        self.ent_ruta.pack(side="left", fill="x", expand=True)
+        self.ent_ruta.insert(0, self.config.get('ruta_local', ''))
+        
+        self.btn_fold = RoundedButtonWrapper(fr_ruta, text="📂", style="Primary.TButton", width=5, command=self.seleccionar_carpeta)
+        self.btn_fold.pack(side="left", padx=(5, 0))
+
+        # -- SEPARADOR --
+        ttk.Separator(c_content, orient="horizontal").grid(row=5, column=0, columnspan=2, sticky="ew", pady=(5, 5))
+
+        # -- SUB-SECCIÓN: FECHAS --
+        ttk.Label(c_content, text="Rango de Fechas (YYYY-MM-DD)", font=("Segoe UI", 10, "bold"), foreground="#0093d0", background="#ffffff").grid(row=6, column=0, columnspan=2, sticky="w", padx=0, pady=(5, 5))
+
+        # Fechas
+        ttk.Label(c_content, text="Fecha Inicio", background="#ffffff").grid(row=7, column=0, sticky="w", pady=(2, 2), padx=(0, 10))
+        self.ent_ini = ttk.Entry(c_content)
+        self.ent_ini.grid(row=8, column=0, sticky="ew", padx=(0, 20))
         self.ent_ini.insert(0, self.config.get('fecha_ini', '2025-01-01'))
-        ttk.Label(fr_f, text="Fin:").grid(row=0, column=2, padx=5)
-        self.ent_fin = ttk.Entry(fr_f); self.ent_fin.grid(row=0, column=3, padx=5)
+        
+        ttk.Label(c_content, text="Fecha Fin", background="#ffffff").grid(row=7, column=1, sticky="w", pady=(2, 2), padx=(0, 10))
+        self.ent_fin = ttk.Entry(c_content)
+        self.ent_fin.grid(row=8, column=1, sticky="ew")
         self.ent_fin.insert(0, self.config.get('fecha_fin', '2025-01-31'))
 
-        fr_btn = ttk.Frame(self.tab_general)
-        fr_btn.pack(fill="x", padx=10, pady=15)
-        self.btn_guardar = ttk.Button(fr_btn, text="💾 Guardar Config", command=self.guardar_config, style="Success.TButton")
-        self.btn_guardar.pack(side="left", padx=5)
-        self.btn_descargar = ttk.Button(fr_btn, text="🚀 EJECUTAR DESCARGA + BD", command=self.run_descarga, style="Primary.TButton")
-        self.btn_descargar.pack(side="left", padx=20)
-        self.btn_reporte = ttk.Button(fr_btn, text="📈 GENERAR REPORTE", command=self.run_reporte, style="Primary.TButton")
-        self.btn_reporte.pack(side="left", padx=5)
-
-        # --- DASHBOARD INFORMATIVO ---
-        fr_dash = tk.Frame(self.tab_general, bg="#f4f6f7")
-        fr_dash.pack(fill="both", expand=True, padx=10, pady=10)
-
-        # Panel Izquierdo: Métricas
-        self.fr_metrics = ttk.LabelFrame(fr_dash, text="Estado del Sistema")
-        self.fr_metrics.pack(side="left", fill="both", expand=True, padx=5)
+        # =========================================================
+        # SECCIÓN 2: BOTONES DE ACCIÓN
+        # =========================================================
+        row_actions = tk.Frame(main_container, bg="#f4f6f7")
+        row_actions.pack(pady=(0, 10))
         
-        self.lbl_info_db = ttk.Label(self.fr_metrics, text="💾 Base de Datos: --", font=("Segoe UI", 9))
-        self.lbl_info_db.pack(anchor="w", padx=10, pady=5)
-        self.lbl_info_upd = ttk.Label(self.fr_metrics, text="📅 Última Modificación: --", font=("Segoe UI", 9))
-        self.lbl_info_upd.pack(anchor="w", padx=10, pady=5)
-        self.lbl_info_files = ttk.Label(self.fr_metrics, text="📥 Archivos Configurados: --", font=("Segoe UI", 9))
-        self.lbl_info_files.pack(anchor="w", padx=10, pady=5)
-        self.lbl_info_filters = ttk.Label(self.fr_metrics, text="📋 Filtros Reporte: --", font=("Segoe UI", 9))
-        self.lbl_info_filters.pack(anchor="w", padx=10, pady=5)
+        def create_action_btn(parent, text, icon, color, command):
+            style = "Primary.TButton"
+            if color == "green": style = "Success.TButton"
+            elif color == "red": style = "Danger.TButton"
+            
+            full_text = f"{icon}  {text}" if icon else text
+            return RoundedButtonWrapper(parent, text=full_text, style=style, command=command, width=25)
 
-        # Panel Derecho: Flujo de Trabajo
-        fr_flow = ttk.LabelFrame(fr_dash, text="Flujo de Trabajo")
-        fr_flow.pack(side="left", fill="both", expand=True, padx=5)
+        self.btn_guardar = create_action_btn(row_actions, "GUARDAR CONFIG", "📁", "green", self.guardar_config)
+        self.btn_guardar.grid(row=0, column=0, padx=10)
+
+        self.btn_descargar = create_action_btn(row_actions, "EJECUTAR DESCARGA", " ▶️", "blue", self.run_descarga)
+        self.btn_descargar.grid(row=0, column=1, padx=10)
         
-        lbl_flow_icon = ttk.Label(fr_flow, text="☁️ XM  ➔  ⬇️ Descarga  ➔  💾 BD  ➔  📈 Visualizador", font=("Segoe UI", 11, "bold"), foreground="#0093d0")
-        lbl_flow_icon.pack(fill="x", padx=10, pady=15)
-        
-        txt_guide = ("1. Configura tus credenciales y rutas.\n"
-                     "2. Ejecuta 'Descarga + BD' para actualizar datos.\n"
-                     "3. Usa el Visualizador o Genera Reportes Excel.")
-        ttk.Label(fr_flow, text=txt_guide, justify="left", foreground="#7f8c8d").pack(anchor="w", padx=10)
+        self.btn_reporte = create_action_btn(row_actions, "GENERAR REPORTE", "📊", "blue", self.run_reporte)
+        self.btn_reporte.grid(row=0, column=2, padx=10)
 
-
-
-        # self.actualizar_dashboard() # MOVIDO A __INIT__ PARA EVITAR ERROR
+        # =========================================================
+        # SECCIÓN 3: DASHBOARD
+        # =========================================================
+        self.frame_dashboard = tk.Frame(main_container, bg="#f4f6f7")
+        self.frame_dashboard.pack(fill="both", expand=True)
+        self.actualizar_dashboard()
 
     def crear_tab_archivos(self):
-        fr_in = ttk.Frame(self.tab_archivos)
-        fr_in.pack(fill="x", padx=5, pady=5)
-        ttk.Label(fr_in, text="Nombre:").pack(side="left")
-        self.ent_f_nom = ttk.Entry(fr_in, width=15); self.ent_f_nom.pack(side="left", padx=2)
-        ttk.Label(fr_in, text="Ruta FTP:").pack(side="left")
-        self.ent_f_rut = ttk.Entry(fr_in, width=30); self.ent_f_rut.pack(side="left", padx=2)
-        ttk.Button(fr_in, text="✚", width=3, command=self.add_file, style="Success.TButton").pack(side="left", padx=5)
-        ttk.Button(fr_in, text="✖", width=3, command=self.del_file, style="Danger.TButton").pack(side="left")
+        self.tab_archivos.configure(bg="#f4f6f7")
+        main_container = tk.Frame(self.tab_archivos, bg="#f4f6f7")
+        main_container.pack(fill="both", expand=True, padx=20, pady=10) # Reduced padding
 
-        self.tree_files = ttk.Treeview(self.tab_archivos, columns=("N","R"), show="headings", height=10)
-        self.tree_files.heading("N", text="Nombre Archivo"); self.tree_files.heading("R", text="Ruta FTP")
-        self.tree_files.pack(fill="both", expand=True, padx=5, pady=5)
-        for i in self.config.get('archivos_descarga', []): self.tree_files.insert("", "end", values=(i['nombre_base'], i['ruta_remota']))
+        # --- TARJETA 1: INPUTS ---
+        card_input = Card(main_container)
+        card_input.pack(fill="x", pady=(0, 10))
+        c1_content = card_input.get_body()
+
+        c1_content.columnconfigure(0, weight=1)
+        c1_content.columnconfigure(1, weight=2)
+        c1_content.columnconfigure(2, weight=0)
+
+        # Nombre Archivo
+        ttk.Label(c1_content, text="Nombre Archivo", background="#ffffff").grid(row=0, column=0, sticky="w", pady=(0, 5), padx=5)
+        self.ent_f_nom = ttk.Entry(c1_content)
+        self.ent_f_nom.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 2))
+        self.add_placeholder(self.ent_f_nom, "ej: trsd, PEI, tserv")
+
+        # Ruta FTP
+        ttk.Label(c1_content, text="Ruta FTP", background="#ffffff").grid(row=0, column=1, sticky="w", pady=(0, 5), padx=5)
+        self.ent_f_rut = ttk.Entry(c1_content)
+        self.ent_f_rut.grid(row=1, column=1, sticky="ew", padx=5, pady=(0, 2))
+        self.add_placeholder(self.ent_f_rut, "ej: /Reportes/Predespacho")
+
+        # Botón Agregar
+        self.btn_add_file = RoundedButtonWrapper(c1_content, text="+", command=self.add_file, style="Success.TButton", width=5)
+        self.btn_add_file.grid(row=1, column=2, padx=5)
+
+        # --- TARJETA 2: LISTADO ---
+        card_list = Card(main_container)
+        card_list.pack(fill="both", expand=True, pady=(0, 10))
+        c2_content = card_list.get_body()
+        
+        columns = ("nombre", "ruta", "acciones")
+        self.tree_files = ttk.Treeview(c2_content, columns=columns, show="headings", height=8)
+        self.tree_files.heading("nombre", text="Nombre Archivo", anchor="w")
+        self.tree_files.heading("ruta", text="Ruta FTP", anchor="w")
+        self.tree_files.heading("acciones", text="Acciones", anchor="center") 
+        
+        self.tree_files.column("nombre", width=150)
+        self.tree_files.column("ruta", width=400, stretch=True) 
+        self.tree_files.column("acciones", width=80, anchor="center")
+        
+        self.tree_files.pack(fill="both", expand=True)
+
+        scrollbar = ttk.Scrollbar(c2_content, orient="vertical", command=self.tree_files.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.tree_files.configure(yscrollcommand=scrollbar.set)
+        
+        for i in self.config.get('archivos_descarga', []): 
+            self.tree_files.insert("", "end", values=(i['nombre_base'], i['ruta_remota'], "🗑️"))
+
+        def on_tree_click(event):
+            region = self.tree_files.identify("region", event.x, event.y)
+            if region == "cell":
+                col = self.tree_files.identify_column(event.x)
+                if col == "#3": 
+                    self.del_file()
+
+        self.tree_files.bind("<Button-1>", on_tree_click)
+
+        # --- INFO BOX ---
+        fr_info = tk.Frame(main_container, bg="#e0f2fe", bd=1, relief="solid")
+        fr_info.pack(fill="x")
+        fr_info.configure(highlightbackground="#bae6fd", highlightthickness=1)
+        
+        tk.Label(fr_info, text="⏬", bg="#e0f2fe", font=("Arial", 12)).pack(side="left", padx=10, pady=10)
+        
+        n_files = len(self.tree_files.get_children())
+        lbl_info_text = tk.Label(fr_info, text=f"Archivos Configurados: {n_files}\nEstos archivos serán descargados del servidor FTP de XM en el rango de fechas especificado.", 
+                                 justify="left", bg="#e0f2fe", fg="#0369a1", font=("Segoe UI", 9))
+        lbl_info_text.pack(side="left", pady=10)
+        self.lbl_info_files_summary = lbl_info_text
 
     def crear_tab_filtros(self):
-        fr_in = ttk.Frame(self.tab_filtros)
-        fr_in.pack(fill="x", padx=5, pady=5)
-        ttk.Label(fr_in, text="Tabla:").pack(side="left")
-        self.ent_r_tab = ttk.Entry(fr_in, width=8); self.ent_r_tab.pack(side="left", padx=2)
-        ttk.Label(fr_in, text="Campo:").pack(side="left")
-        self.ent_r_cam = ttk.Entry(fr_in, width=8); self.ent_r_cam.pack(side="left", padx=2)
-        ttk.Label(fr_in, text="Valor:").pack(side="left")
-        self.ent_r_val = ttk.Entry(fr_in, width=8); self.ent_r_val.pack(side="left", padx=2)
-        ttk.Label(fr_in, text="Versión:").pack(side="left")
-        self.cb_r_ver = ttk.Combobox(fr_in, width=7, state="readonly")
-        self.cb_r_ver['values'] = ["Última", "tx1", "tx2", "txf", "txr", "txa", "def"]
-        self.cb_r_ver.set("Última")
-        self.cb_r_ver.pack(side="left", padx=2)
-        # BINDING para actualización masiva
-        self.cb_r_ver.bind("<<ComboboxSelected>>", self.actualizar_todas_versiones_filtro)
-        
-        ttk.Button(fr_in, text="✚", width=3, command=self.add_filtro, style="Success.TButton").pack(side="left", padx=2)
-        ttk.Button(fr_in, text="✖", width=3, command=self.del_filtro, style="Danger.TButton").pack(side="left", padx=2)
-        ttk.Separator(fr_in, orient="vertical").pack(side="left", padx=5, fill="y")
-        ttk.Button(fr_in, text="▲", width=3, command=self.move_up, style="Primary.TButton").pack(side="left", padx=2)
-        ttk.Button(fr_in, text="▼", width=3, command=self.move_down, style="Primary.TButton").pack(side="left", padx=2)
+        self.tab_filtros.configure(bg="#f4f6f7")
+        main_container = tk.Frame(self.tab_filtros, bg="#f4f6f7")
+        main_container.pack(fill="both", expand=True, padx=20, pady=10) # Reduced padding
 
-        self.tree_filtros = ttk.Treeview(self.tab_filtros, columns=("T","C","V","Ver"), show="headings", height=10)
-        self.tree_filtros.heading("T", text="Tabla"); self.tree_filtros.column("T", width=100)
-        self.tree_filtros.heading("C", text="Campo"); self.tree_filtros.column("C", width=100)
-        self.tree_filtros.heading("V", text="Valor"); self.tree_filtros.column("V", width=100)
-        self.tree_filtros.heading("Ver", text="Versión"); self.tree_filtros.column("Ver", width=60) 
-        self.tree_filtros.pack(fill="both", expand=True, padx=5, pady=5)
+        # --- TARJETA 1: INPUTS (GRID 4 COLUMNAS) ---
+        fr_card_input = tk.Frame(main_container, bg="#f4f6f7")
+        fr_card_input.pack(fill="x", pady=(0, 10))
         
-        for i in self.config.get('filtros_reporte', []): 
-            self.tree_filtros.insert("", "end", values=(i['tabla'], i.get('campo',''), i.get('valor',''), i.get('version','')))
+        card_input = Card(fr_card_input)
+        card_input.pack(fill="both", expand=True)
+        c1_content = card_input.get_body()
+
+        # Configurar Grid
+        c1_content.columnconfigure(0, weight=1)
+        c1_content.columnconfigure(1, weight=1)
+        c1_content.columnconfigure(2, weight=1) 
+        c1_content.columnconfigure(3, weight=0, minsize=80) # Fixed size
+        c1_content.columnconfigure(4, weight=0) # Botones
+
+        # Col 0: Tabla
+        ttk.Label(c1_content, text="Tabla", background="#ffffff").grid(row=0, column=0, sticky="w", pady=(0, 5), padx=5)
+        self.ent_r_tab = ttk.Entry(c1_content)
+        self.ent_r_tab.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 2))
+        self.add_placeholder(self.ent_r_tab, "ej: trsd, afac")
+
+        # Col 1: Campo
+        ttk.Label(c1_content, text="Campo", background="#ffffff").grid(row=0, column=1, sticky="w", pady=(0, 5), padx=5)
+        self.ent_r_cam = ttk.Entry(c1_content)
+        self.ent_r_cam.grid(row=1, column=1, sticky="ew", padx=5, pady=(0, 2))
+        self.add_placeholder(self.ent_r_cam, "ej: Recurso, Agente")
+
+        # Col 2: Valor
+        ttk.Label(c1_content, text="Valor", background="#ffffff").grid(row=0, column=2, sticky="w", pady=(0, 5), padx=5)
+        self.ent_r_val = ttk.Entry(c1_content)
+        self.ent_r_val.grid(row=1, column=2, sticky="ew", padx=5, pady=(0, 2))
+        self.add_placeholder(self.ent_r_val, "ej: IXEG")
+
+        # Col 3: Versión (Combobox)
+        ttk.Label(c1_content, text="Versión", background="#ffffff").grid(row=0, column=3, sticky="w", pady=(0, 5), padx=5)
+        self.cb_r_ver = ttk.Combobox(c1_content, values=["Última", "tx1", "tx2", "tx3", "txR"], state="readonly", width=10) # Fixed width
+        self.cb_r_ver.set("Última")
+        self.cb_r_ver.grid(row=1, column=3, sticky="ew", padx=5, ipady=3)
+        self.cb_r_ver.bind("<<ComboboxSelected>>", self.actualizar_todas_versiones_filtro)
+
+        # Botones (+, Up, Down)
+        fr_btns = tk.Frame(c1_content, bg="#ffffff")
+        fr_btns.grid(row=1, column=4, padx=5)
+        
+        def small_btn(txt, cmd, color="#0093d0"):
+            style = "Primary.TButton"
+            if color == "#8cc63f": style = "Success.TButton"
+            b = RoundedButtonWrapper(fr_btns, text=txt, style=style, width=5, command=cmd) # Width approx for small btn
+            b.pack(side="left", padx=2)
+            return b
+
+        small_btn("✚", self.add_filtro, "#8cc63f")
+        small_btn("▲", self.move_up)
+        small_btn("▼", self.move_down)
+
+        # --- TARJETA 2: LISTADO ---
+        fr_card_list = tk.Frame(main_container, bg="#f4f6f7")
+        fr_card_list.pack(fill="both", expand=True, pady=(0, 10))
+        
+        card_list = Card(fr_card_list, fill_height=True)
+        card_list.pack(fill="both", expand=True)
+        c2_content = card_list.get_body()
+        
+        columns = ("tabla", "campo", "valor", "version", "acciones")
+        self.tree_filtros = ttk.Treeview(c2_content, columns=columns, show="headings", height=8)
+        
+        self.tree_filtros.heading("tabla", text="Tabla", anchor="w")
+        self.tree_filtros.heading("campo", text="Campo", anchor="w")
+        self.tree_filtros.heading("valor", text="Valor", anchor="w")
+        self.tree_filtros.heading("version", text="Versión", anchor="center")
+        self.tree_filtros.heading("acciones", text="Acciones", anchor="center")
+        
+        self.tree_filtros.column("tabla", width=120)
+        self.tree_filtros.column("campo", width=150)
+        self.tree_filtros.column("valor", width=200, stretch=True)
+        self.tree_filtros.column("version", width=100, anchor="center")
+        self.tree_filtros.column("acciones", width=80, anchor="center")
+        
+        self.tree_filtros.pack(fill="both", expand=True)
+        
+        scrollbar = ttk.Scrollbar(c2_content, orient="vertical", command=self.tree_filtros.yview)
+        scrollbar.pack(side="right", fill="y")
+        self.tree_filtros.configure(yscrollcommand=scrollbar.set)
+        
+        for i in self.config.get('filtros_reporte', []):
+            self.tree_filtros.insert("", "end", values=(i['tabla'], i.get('campo',''), i.get('valor',''), i.get('version',''), "🗑️"))
+
+        # Binding Doble Click
+        self.tree_filtros.bind("<Button-1>", lambda e: self.del_filtro() if self.tree_filtros.identify_column(e.x) == "#5" else None)
+
+        # --- INFO BOX (Blue) ---
+        fr_info = tk.Frame(main_container, bg="#e0f2fe", bd=1, relief="solid") 
+        fr_info.pack(fill="x")
+        fr_info.configure(highlightbackground="#bae6fd", highlightthickness=1)
+        
+        tk.Label(fr_info, text="🝖", font=("Segoe UI Symbol", 14), bg="#e0f2fe", fg="#0369a1").pack(side="left", padx=10, pady=10) # Icono filtros
+
+        n_filtros = len(self.tree_filtros.get_children())
+        lbl_text = tk.Label(fr_info, text=f"Filtros Configurados: {n_filtros}\nLos filtros se aplicarán en el orden mostrado al generar el reporte Excel horizontal.", 
+                                 justify="left", bg="#e0f2fe", fg="#0369a1", font=("Segoe UI", 9))
+        lbl_text.pack(side="left", pady=10)
+        self.lbl_info_filtros_summary = lbl_text
 
     def move_up(self):
         selection = self.tree_filtros.selection()
@@ -1658,17 +1959,52 @@ class AplicacionXM:
         if d: self.ent_ruta.delete(0, tk.END); self.ent_ruta.insert(0, d)
     
     def add_file(self):
-        if self.ent_f_nom.get(): self.tree_files.insert("", "end", values=(self.ent_f_nom.get(), self.ent_f_rut.get()))
-        self.ent_f_nom.delete(0, tk.END)
+        nom, rut = self.ent_f_nom.get(), self.ent_f_rut.get()
+        ph_nom = "ej: trsd, PEI, tserv"
+        ph_rut = "ej: /Reportes/Predespacho"
+        
+        if nom and rut and nom != ph_nom and rut != ph_rut:
+            self.tree_files.insert("", "end", values=(nom, rut, "🗑️"))
+            
+            # Reset a placeholder
+            self.ent_f_nom.delete(0, tk.END); self.ent_f_nom.insert(0, ph_nom); self.ent_f_nom.configure(fg="#95a5a6")
+            self.ent_f_rut.delete(0, tk.END); self.ent_f_rut.insert(0, ph_rut); self.ent_f_rut.configure(fg="#95a5a6")
+            
+            self.update_file_count_ui()
+            # Foco al nombre para seguir añadiendo rápido
+            self.ent_f_nom.focus_set()
+            # Hack: Al hacer focus, el evento FocusIn borrará el placeholder recién puesto?
+            # SÍ. Si hacemos focus, trigger FocusIn -> borra.
+            # Mejor NO hacer focus set, o si lo hacemos, dejarlo vacio.
+            # El usuario pide comportamiento "placeholder", asi que dejarlo en estado placeholder es lo correcto.
 
     def del_file(self):
         for s in self.tree_files.selection(): self.tree_files.delete(s)
+        self.update_file_count_ui()
+        
+    def update_file_count_ui(self):
+        if hasattr(self, 'lbl_info_files_summary'):
+            n = len(self.tree_files.get_children())
+            self.lbl_info_files_summary.config(text=f"Archivos Configurados: {n}\nEstos archivos serán descargados del servidor FTP de XM en el rango de fechas especificado.")
 
     def add_filtro(self):
-        if self.ent_r_tab.get():
-            self.tree_filtros.insert("", "end", values=(self.ent_r_tab.get(), self.ent_r_cam.get(), self.ent_r_val.get(), self.cb_r_ver.get()))
-            self.ent_r_tab.delete(0, tk.END); self.ent_r_cam.delete(0, tk.END); self.ent_r_val.delete(0, tk.END)
-            # self.cb_r_ver.set("Última") # Opcional: reiniciar o mantener
+        t, c, v = self.ent_r_tab.get(), self.ent_r_cam.get(), self.ent_r_val.get()
+        ph_t, ph_c, ph_v = "ej: trsd, afac", "ej: Recurso, Agente", "ej: IXEG"
+        
+        # Validar SOLO Tabla como obligatorio (como era antes)
+        if t and t != ph_t:
+            # Si los otros son placeholders, enviar vacío
+            val_c = c if c != ph_c else ""
+            val_v = v if v != ph_v else ""
+            
+            self.tree_filtros.insert("", "end", values=(t, val_c, val_v, self.cb_r_ver.get(), "🗑️"))
+            
+            # Reset
+            self.ent_r_tab.delete(0, tk.END); self.ent_r_tab.insert(0, ph_t); self.ent_r_tab.configure(fg="#95a5a6")
+            self.ent_r_cam.delete(0, tk.END); self.ent_r_cam.insert(0, ph_c); self.ent_r_cam.configure(fg="#95a5a6")
+            self.ent_r_val.delete(0, tk.END); self.ent_r_val.insert(0, ph_v); self.ent_r_val.configure(fg="#95a5a6")
+            
+            self.update_filtro_count_ui()
 
     def actualizar_todas_versiones_filtro(self, event=None):
         nueva_version = self.cb_r_ver.get()
@@ -1676,12 +2012,19 @@ class AplicacionXM:
         # Recorrer todos los items del treeview y actualizar columna versión (índice 3)
         for item_id in self.tree_filtros.get_children():
             vals = list(self.tree_filtros.item(item_id, 'values'))
-            # vals es una tupla, convertimos a lista, modificamos y seteamos
-            vals[3] = nueva_version
-            self.tree_filtros.item(item_id, values=vals)
+            if len(vals) >= 4:
+                vals[3] = nueva_version
+                self.tree_filtros.item(item_id, values=vals)
 
     def del_filtro(self):
         for s in self.tree_filtros.selection(): self.tree_filtros.delete(s)
+        self.update_filtro_count_ui()
+
+    def update_filtro_count_ui(self):
+        if hasattr(self, 'lbl_info_filtros_summary'):
+            n = len(self.tree_filtros.get_children())
+            self.lbl_info_filtros_summary.config(text=f"Filtros Configurados: {n}\nLos filtros se aplicarán en el orden mostrado al generar el reporte Excel horizontal.")
+        # self.actualizar_dashboard()
 
     def get_config(self):
         return {
@@ -1708,27 +2051,62 @@ class AplicacionXM:
         except Exception as e: print(f"❌ Error guardando: {e}")
 
     def actualizar_dashboard(self):
-        # 1. Info DB
+        # 0. Limpiar previo
+        for w in self.frame_dashboard.winfo_children(): w.destroy()
+        
+        # 1. Recopilar Stats
         ruta = self.ent_ruta.get()
         db_path = os.path.join(ruta, NOMBRE_DB_FILE)
-        if os.path.exists(db_path):
-            size_mb = os.path.getsize(db_path) / (1024 * 1024)
-            mtime = datetime.fromtimestamp(os.path.getmtime(db_path)).strftime('%Y-%m-%d %H:%M')
-            self.lbl_info_db.config(text=f"💾 Base de Datos: {size_mb:.2f} MB", foreground="#27ae60")
-            self.lbl_info_upd.config(text=f"📅 Actualizado: {mtime}")
-        else:
-            self.lbl_info_db.config(text="💾 Base de Datos: No encontrada", foreground="#e74c3c")
-            self.lbl_info_upd.config(text="📅 Actualizado: --")
-
-        # 2. Conteos (Safeguard)
+        
         n_files = 0
         if hasattr(self, 'tree_files'): n_files = len(self.tree_files.get_children())
-        
         n_filters = 0
         if hasattr(self, 'tree_filtros'): n_filters = len(self.tree_filtros.get_children())
+        
+        db_exists = os.path.exists(db_path)
+        db_size = f"{os.path.getsize(db_path)/(1024*1024):.2f} MB" if db_exists else "0 MB"
+        db_time = datetime.fromtimestamp(os.path.getmtime(db_path)).strftime('%Y-%m-%d %H:%M') if db_exists else "--"
+        
+        # 2. Construir Layout 2 Columnas (Estilo Card)
+        
+        # Panel Izquierdo: Métricas
+        col_metrics = tk.Frame(self.frame_dashboard, bg="#f4f6f7")
+        col_metrics.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        
+        card_metrics = Card(col_metrics, title="Estado del Sistema")
+        card_metrics.pack(fill="both", expand=True)
+        content_metrics = card_metrics.get_body()
 
-        self.lbl_info_files.config(text=f"📥 Archivos Configurados: {n_files}")
-        self.lbl_info_filters.config(text=f"📋 Filtros Reporte: {n_filters}")
+        # Items con Iconos
+        def add_stat_row(parent, icon, title, value, color_val="#2c3e50"):
+            row = tk.Frame(parent, bg="#ffffff")
+            row.pack(fill="x", pady=5)
+            tk.Label(row, text=icon, font=("Arial", 12), bg="#ffffff").pack(side="left", padx=5)
+            tk.Label(row, text=title, font=("Segoe UI", 9, "bold"), bg="#ffffff", fg="#6b7280").pack(side="left")
+            tk.Label(row, text=value, font=("Segoe UI Semibold", 10), bg="#ffffff", fg=color_val).pack(side="right", padx=10)
+
+        add_stat_row(content_metrics, "💾", "Base de Datos", db_size, "#16a34a" if db_exists else "#dc2626") 
+        add_stat_row(content_metrics, "📅", "Última Modificación", db_time)
+        add_stat_row(content_metrics, "📥", "Archivos Configurados", str(n_files))
+        add_stat_row(content_metrics, "📋", "Filtros Reporte", str(n_filters))
+
+        # Panel Derecho: Flujo de Trabajo
+        col_flow = tk.Frame(self.frame_dashboard, bg="#f4f6f7")
+        col_flow.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        
+        card_flow = Card(col_flow, title="Flujo de Trabajo", icon="🚀")
+        card_flow.pack(fill="both", expand=True)
+        content_flow = card_flow.get_body()
+        
+        # Diagrama Visual Simple
+        flow_diagram = tk.Label(content_flow, text="FTP XM  ➔  📥 Descarga  ➔  💾 BD  ➔  📈 Visualizador", 
+                                font=("Segoe UI Symbol", 12, "bold"), bg="#ffffff", fg="#0093d0", justify="center")
+        flow_diagram.pack(fill="both", expand=True, padx=10, pady=(20, 10))
+        
+        guide_text = ("1. Configura credenciales y fechas.\n"
+                      "2. Presiona 'EJECUTAR' para actualizar todo.\n"
+                      "3. Genera Reportes o visualiza gráficos.")
+        tk.Label(content_flow, text=guide_text, font=("Segoe UI", 9), bg="#ffffff", fg="#6b7280", justify="center").pack(pady=10)
 
     def cargar_config(self):
         if os.path.exists(ARCHIVO_CONFIG):
@@ -1755,7 +2133,7 @@ class AplicacionXM:
         except Exception as e:
             log.error(f"❌ Error crítico en proceso: {e}")
         finally:
-            self.root.after(0, lambda: self.toggle_controls('normal'))
+            self.root.after(0, lambda: [self.toggle_controls('normal'), self.actualizar_dashboard()])
 
     def run_reporte(self):
         if not self.validar_config(): return
@@ -1768,7 +2146,7 @@ class AplicacionXM:
         except Exception as e:
             log.error(f"❌ Error crítico generando reporte: {e}")
         finally:
-            self.root.after(0, lambda: self.toggle_controls('normal'))
+            self.root.after(0, lambda: [self.toggle_controls('normal'), self.actualizar_dashboard()])
 
 if __name__ == "__main__":
     root = tk.Tk()
