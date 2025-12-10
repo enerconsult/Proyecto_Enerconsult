@@ -1568,7 +1568,7 @@ class AplicacionXM:
                   x1, y1]
         return canvas.create_polygon(points, **kwargs, smooth=True)
 
-    def create_card(self, parent, title=None, icon=None):
+    def create_card(self, parent, title=None, icon=None, fill_height=False):
         """
         Crea una tarjeta con bordes REDONDEADOS usando Canvas.
         Retorna (contenedor_visual, frame_interno)
@@ -1641,17 +1641,21 @@ class AplicacionXM:
             self.round_rectangle(canvas, 1, 1, e.width-1, e.height-1, radius=15, outline=border_color, width=1, fill=bg_card, tags="bg_rect")
             canvas.tag_lower("bg_rect")
             # Ajustar tamano del window interno
-            canvas.itemconfig(win_id, width=e.width-20)
+            if fill_height:
+                 canvas.itemconfig(win_id, width=e.width-20, height=e.height-20)
+            else:
+                 canvas.itemconfig(win_id, width=e.width-20)
 
         canvas.bind("<Configure>", on_config_canvas)
         
         # PROPAGACION DE ALTURA:
         # Cuando el inner_frame cambia de tamaño (por su contenido), forzar al canvas a crecer.
         def on_config_inner(e):
-            # Verificar si la altura requerida es diferente a la actual para evitar jitter
-            req_h = e.height + 20
-            if canvas.winfo_height() != req_h:
-                canvas.configure(height=req_h)
+            if not fill_height:
+                # Verificar si la altura requerida es diferente a la actual para evitar jitter
+                req_h = e.height + 20
+                if canvas.winfo_height() != req_h:
+                    canvas.configure(height=req_h)
 
         inner_frame.bind("<Configure>", on_config_inner)
         
@@ -1888,7 +1892,7 @@ class AplicacionXM:
         fr_card_list = tk.Frame(main_container, bg="#f4f6f7")
         fr_card_list.pack(fill="both", expand=True, pady=(0, 10))
         
-        _, c2_content = self.create_card(fr_card_list)
+        _, c2_content = self.create_card(fr_card_list, fill_height=True)
         _.pack(fill="both", expand=True)
         
         columns = ("nombre", "ruta", "acciones")
@@ -2000,7 +2004,7 @@ class AplicacionXM:
         fr_card_list = tk.Frame(main_container, bg="#f4f6f7")
         fr_card_list.pack(fill="both", expand=True, pady=(0, 10))
         
-        _, c2_content = self.create_card(fr_card_list)
+        _, c2_content = self.create_card(fr_card_list, fill_height=True)
         _.pack(fill="both", expand=True)
         
         columns = ("tabla", "campo", "valor", "version", "acciones")
