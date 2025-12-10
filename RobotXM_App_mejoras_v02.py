@@ -302,8 +302,7 @@ def make_ftps_connection(usuario, password):
         raise Exception(f"Fallo conexión FTP: {e}")
     return ftps
 
-def conectar_ftps(usuario, password):
-    return make_ftps_connection(usuario, password)
+
 
 def retrbinary_safe(ftps, cmd, callback, blocksize=8192):
     attempts = 0
@@ -1568,6 +1567,10 @@ class AplicacionXM:
                   x1, y1]
         return canvas.create_polygon(points, **kwargs, smooth=True)
 
+    def create_styled_label(self, parent, text, font=("Segoe UI Semibold", 9)):
+        """Helper para labels standard"""
+        return tk.Label(parent, text=text, bg="#ffffff", fg="#374151", font=font)
+
     def create_card(self, parent, title=None, icon=None, fill_height=False):
         """
         Crea una tarjeta con bordes REDONDEADOS usando Canvas.
@@ -1775,25 +1778,23 @@ class AplicacionXM:
         # -- SUB-SECCIÓN: CREDENCIALES --
         tk.Label(c_content, text="Credenciales FTP y Rutas", bg="#ffffff", fg="#0093d0", font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 10))
 
-        # Helper para labels
-        def add_label(parent, text, r, c):
-            tk.Label(parent, text=text, bg="#ffffff", fg="#374151", font=("Segoe UI Semibold", 9)).grid(row=r, column=c, sticky="w", pady=(2, 2), padx=(0, 10))
+
 
         # Usuario
-        add_label(c_content, "Usuario FTP", 1, 0)
+        self.create_styled_label(c_content, "Usuario FTP").grid(row=1, column=0, sticky="w", pady=(2, 2), padx=(0, 10))
         c_user, self.ent_user = self.create_rounded_entry(c_content)
         c_user.grid(row=2, column=0, sticky="ew", padx=(0, 20), pady=(0, 5))
         self.ent_user.insert(0, self.config.get('usuario', ''))
 
         # Password
-        add_label(c_content, "Password FTP", 1, 1)
+        self.create_styled_label(c_content, "Password FTP").grid(row=1, column=1, sticky="w", pady=(2, 2), padx=(0, 10))
         c_pass, self.ent_pass = self.create_rounded_entry(c_content)
         c_pass.grid(row=2, column=1, sticky="ew", pady=(0, 5))
         self.ent_pass.config(show="*", font=("Segoe UI", 10)) 
         self.ent_pass.insert(0, self.config.get('password', ''))
 
         # Ruta
-        add_label(c_content, "Ruta Local", 3, 0)
+        self.create_styled_label(c_content, "Ruta Local").grid(row=3, column=0, sticky="w", pady=(2, 2), padx=(0, 10))
         fr_ruta = tk.Frame(c_content, bg="#ffffff")
         fr_ruta.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(0, 10)) # Reduced spacing
         
@@ -1811,12 +1812,12 @@ class AplicacionXM:
         tk.Label(c_content, text="Rango de Fechas (YYYY-MM-DD)", bg="#ffffff", fg="#0093d0", font=("Segoe UI", 10, "bold")).grid(row=6, column=0, columnspan=2, sticky="w", padx=0, pady=(5, 5))
 
         # Fechas
-        add_label(c_content, "Fecha Inicio", 7, 0)
+        self.create_styled_label(c_content, "Fecha Inicio").grid(row=7, column=0, sticky="w", pady=(2, 2), padx=(0, 10))
         c_ini, self.ent_ini = self.create_rounded_entry(c_content)
         c_ini.grid(row=8, column=0, sticky="ew", padx=(0, 20))
         self.ent_ini.insert(0, self.config.get('fecha_ini', '2025-01-01'))
         
-        add_label(c_content, "Fecha Fin", 7, 1)
+        self.create_styled_label(c_content, "Fecha Fin").grid(row=7, column=1, sticky="w", pady=(2, 2), padx=(0, 10))
         c_fin, self.ent_fin = self.create_rounded_entry(c_content)
         c_fin.grid(row=8, column=1, sticky="ew")
         self.ent_fin.insert(0, self.config.get('fecha_fin', '2025-01-31'))
@@ -1866,18 +1867,16 @@ class AplicacionXM:
         c1_content.columnconfigure(1, weight=2)
         c1_content.columnconfigure(2, weight=0)
 
-        # Helpers
-        def add_lbl(parent, text, c):
-             tk.Label(parent, text=text, bg="#ffffff", fg="#374151", font=("Segoe UI Semibold", 9)).grid(row=0, column=c, sticky="w", pady=(0, 5), padx=5)
+
 
         # Nombre Archivo
-        add_lbl(c1_content, "Nombre Archivo", 0)
+        self.create_styled_label(c1_content, "Nombre Archivo").grid(row=0, column=0, sticky="w", pady=(0, 5), padx=5)
         c_nom, self.ent_f_nom = self.create_rounded_entry(c1_content)
         c_nom.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 2))
         self.add_placeholder(self.ent_f_nom, "ej: trsd, PEI, tserv")
 
         # Ruta FTP
-        add_lbl(c1_content, "Ruta FTP", 1)
+        self.create_styled_label(c1_content, "Ruta FTP").grid(row=0, column=1, sticky="w", pady=(0, 5), padx=5)
         c_rut, self.ent_f_rut = self.create_rounded_entry(c1_content)
         c_rut.grid(row=1, column=1, sticky="ew", padx=5, pady=(0, 2))
         self.add_placeholder(self.ent_f_rut, "ej: /Reportes/Predespacho")
@@ -1957,29 +1956,28 @@ class AplicacionXM:
         c1_content.columnconfigure(3, weight=0, minsize=80) # Fixed size, no shrink
         c1_content.columnconfigure(4, weight=0) # Botones
 
-        def add_lbl(parent, text, c):
-             tk.Label(parent, text=text, bg="#ffffff", fg="#374151", font=("Segoe UI Semibold", 9)).grid(row=0, column=c, sticky="w", pady=(0, 5), padx=5)
+
 
         # Col 0: Tabla
-        add_lbl(c1_content, "Tabla", 0)
+        self.create_styled_label(c1_content, "Tabla").grid(row=0, column=0, sticky="w", pady=(0, 5), padx=5)
         c_tab, self.ent_r_tab = self.create_rounded_entry(c1_content)
         c_tab.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 2))
         self.add_placeholder(self.ent_r_tab, "ej: trsd, afac")
 
         # Col 1: Campo
-        add_lbl(c1_content, "Campo", 1)
+        self.create_styled_label(c1_content, "Campo").grid(row=0, column=1, sticky="w", pady=(0, 5), padx=5)
         c_cam, self.ent_r_cam = self.create_rounded_entry(c1_content)
         c_cam.grid(row=1, column=1, sticky="ew", padx=5, pady=(0, 2))
         self.add_placeholder(self.ent_r_cam, "ej: Recurso, Agente")
 
         # Col 2: Valor
-        add_lbl(c1_content, "Valor", 2)
+        self.create_styled_label(c1_content, "Valor").grid(row=0, column=2, sticky="w", pady=(0, 5), padx=5)
         c_val, self.ent_r_val = self.create_rounded_entry(c1_content)
         c_val.grid(row=1, column=2, sticky="ew", padx=5, pady=(0, 2))
         self.add_placeholder(self.ent_r_val, "ej: IXEG")
 
         # Col 3: Versión (Combobox)
-        add_lbl(c1_content, "Versión", 3)
+        self.create_styled_label(c1_content, "Versión").grid(row=0, column=3, sticky="w", pady=(0, 5), padx=5)
         self.cb_r_ver = ttk.Combobox(c1_content, values=["Última", "tx1", "tx2", "tx3", "txR"], state="readonly", width=10) # Fixed width
         self.cb_r_ver.set("Última")
         self.cb_r_ver.grid(row=1, column=3, sticky="ew", padx=5, ipady=3)
