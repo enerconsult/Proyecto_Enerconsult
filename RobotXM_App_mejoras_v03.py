@@ -66,6 +66,7 @@ COLORES_GRAFICO = {
     "Rojo Intenso": "#e74c3c",
     "Naranja": "#f39c12",
     "Morado": "#9b59b6",
+    "Gris Oscuro": "#3E5770",
     "Negro": "#000000"
 }
 
@@ -176,6 +177,9 @@ class CustomDropdownWithTooltip:
         self.filtered_items = self.items[:]
 
     def show_dropdown(self, event=None):
+        # Si está deshabilitado, no hacer nada
+        if str(self.entry['state']) == 'disabled': return
+
         # toggle
         if self.dropdown:
             self.close_dropdown()
@@ -325,22 +329,32 @@ def width_chars(pixels):
 # Card (simple, ttk-based)
 # ======================
 class Card(ttk.Frame):
-    """Card visual simple usando ttk.Frame y padding.
-    No pretende dibujar esquinas redondeadas, pero brinda un contenedor consistente,
-    con header opcional.
+    """Card visual mejorada con mejor espaciado, sombra simulada y efecto visual moderno.
+    Usa múltiples frames para crear un efecto visual de profundidad y bordes suaves.
     """
     def __init__(self, parent, title=None, icon=None, *args, **kwargs):
-        super().__init__(parent, style="Card.TFrame", padding=(10, 8))
+        # Frame externo para sombra simulada con padding
+        self.shadow_frame = tk.Frame(parent, bg="#e2e8f0")
+        
+        # Frame intermedio para efecto de profundidad
+        self.mid_frame = tk.Frame(self.shadow_frame, bg="#f0f2f5")
+        self.mid_frame.pack(fill="both", expand=True, padx=1, pady=1)
+        
+        # Frame principal (card) con padding aumentado
+        super().__init__(self.mid_frame, style="Card.TFrame", padding=(20, 16))
+        super().pack(fill="both", expand=True)  # Empaquetar el frame interno
+        
         # crear header si corresponde
         if title or icon:
             header = ttk.Frame(self, style="CardHeader.TFrame")
-            header.pack(fill="x", pady=(0, 6))
+            header.pack(fill="x", pady=(0, 12))  # Más espacio (antes 6)
             if icon:
                 lbl_icon = ttk.Label(header, text=icon, style="CardIcon.TLabel")
-                lbl_icon.pack(side="left", padx=(0, 8))
+                lbl_icon.pack(side="left", padx=(0, 8), anchor="center")  # Más espacio (antes 4)
+
             if title:
                 lbl_title = ttk.Label(header, text=title, style="CardTitle.TLabel")
-                lbl_title.pack(side="left")
+                lbl_title.pack(side="left", anchor="w")
 
         # body: donde el usuario pone widgets
         self.body = ttk.Frame(self, style="CardBody.TFrame")
@@ -348,6 +362,16 @@ class Card(ttk.Frame):
 
     def get_body(self):
         return self.body
+    
+    def pack(self, **kwargs):
+        """Override pack para empaquetar el shadow_frame con padding para sombra"""
+        # Agregar padding para simular sombra y efecto visual
+        shadow_kwargs = kwargs.copy()
+        if 'padx' not in shadow_kwargs:
+            shadow_kwargs['padx'] = 3  # Aumentado para mejor efecto
+        if 'pady' not in shadow_kwargs:
+            shadow_kwargs['pady'] = 3  # Aumentado para mejor efecto
+        self.shadow_frame.pack(**shadow_kwargs)
 
 # ======================
 # RoundedButtonWrapper (usa ttk.Button + estilo)
@@ -384,7 +408,9 @@ def generar_fechas_permitidas(fecha_ini, fecha_fin):
     delta = fecha_fin - fecha_ini
     for i in range(delta.days + 1):
         dia = fecha_ini + timedelta(days=i)
+        # Soportar DD (ej. 01) y MMDD (ej. 1101) para archivos diarios
         dias.append(dia.strftime("%d"))
+        dias.append(dia.strftime("%m%d"))
         meses.add(dia.strftime("%Y-%m"))
     return dias, meses
 
@@ -472,14 +498,47 @@ def bulk_insert_fast(conn, ruta_csv, tabla, meta_cols, chunksize=50000):
             reader = csv.DictReader(f, delimiter=';', skipinitialspace=True)
             if not reader.fieldnames: return 0
             
-            # Normalizar columnas
-            cols_csv = [safe_identifier(c.strip().replace(' ', '_').lower()) for c in reader.fieldnames]
+            # Normalizar columnas: quitar paréntesis y caracteres extraños de los headers del CSV
+            def clean_col_name(c):
+                # 1. Match v12 logic: strip, lower, space->underscore
+                # Permite parentesis (ej: "fecha_(hora)") evitando duplicados.
+                s = c.strip().replace(' ', '_').lower()
+                # 2. Safety: Quitar comillas dobles para no romper la query SQL construida manualmente
+                return s.replace('"', '')
+
+            cols_csv = [clean_col_name(c) for c in reader.fieldnames]
             
             # Columnas totales = CSV + Meta
             all_cols = cols_csv + list(meta_cols.keys())
+            
+            # --- AUTO-CREATE TABLE IF NOT EXISTS ---
+            # Usamos comillas dobles para soportar nombres reservados (ej. "index", "group")
+            defs = [f'"{c}" TEXT' for c in all_cols]
+            create_sql = f'CREATE TABLE IF NOT EXISTS "{tabla}" ({", ".join(defs)})'
+            try:
+                conn.execute(create_sql)
+            except Exception as e:
+                log.error(f"Error creando tabla {tabla}: {e}")
+                raise e
+
+            # Verificar si hay columnas nuevas
+            try:
+                cursor = conn.cursor()
+                cursor.execute(f"PRAGMA table_info(\"{tabla}\")")
+                existing_cols = {row[1] for row in cursor.fetchall()}
+                for c in all_cols:
+                    if c not in existing_cols:
+                        try:
+                            conn.execute(f'ALTER TABLE "{tabla}" ADD COLUMN "{c}" TEXT')
+                            log.info(f"Columna nueva agregada a {tabla}: {c}")
+                        except: pass 
+            except: pass
+            # ----------------------------------------
+
+            cols_quoted = [f'"{c}"' for c in all_cols]
             placeholders = ",".join(["?"] * len(all_cols))
             
-            sql = f"INSERT INTO {tabla} ({','.join(all_cols)}) VALUES ({placeholders})"
+            sql = f'INSERT INTO "{tabla}" ({",".join(cols_quoted)}) VALUES ({placeholders})'
             
             batch = []
             
@@ -514,7 +573,7 @@ def bulk_insert_fast(conn, ruta_csv, tabla, meta_cols, chunksize=50000):
 
 def ensure_indexes(conn, tabla, cols):
     for col in cols:
-        try: conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabla}_{col} ON {tabla}({col})")
+        try: conn.execute(f'CREATE INDEX IF NOT EXISTS "idx_{tabla}_{col}" ON "{tabla}"("{col}")')
         except: pass
 
 def proceso_descarga(config, es_reintento=False):
@@ -804,11 +863,13 @@ def generar_reporte_logica(config):
                     print(f"   ⚠️ Tabla '{tabla_solicitada}' no encontrada.")
                     continue
                 nombre_real_bd = resultado[0]
-                query = f"SELECT * FROM {nombre_real_bd} WHERE 1=1"
+                # Quote table name
+                query = f'SELECT * FROM "{nombre_real_bd}" WHERE 1=1'
                 titulo_texto = f"ARCHIVO: {tabla_solicitada.upper()}"
 
                 if col_filtro_usuario and val_filtro_usuario:
-                    cursor.execute(f"PRAGMA table_info({nombre_real_bd})")
+                    # Quote table name in PRAGMA
+                    cursor.execute(f'PRAGMA table_info("{nombre_real_bd}")')
                     columnas_bd = cursor.fetchall()
                     nombre_columna_real = None
                     for col_info in columnas_bd:
@@ -816,12 +877,13 @@ def generar_reporte_logica(config):
                             nombre_columna_real = col_info[1]
                             break
                     if nombre_columna_real:
-                        query += f" AND CAST({nombre_columna_real} AS TEXT) = '{val_filtro_usuario}'"
+                        # Quote column name
+                        query += f" AND CAST(\"{nombre_columna_real}\" AS TEXT) = '{val_filtro_usuario}'"
                         titulo_texto += f" ({val_filtro_usuario})"
                     else: print(f"   ⚠️ Campo '{col_filtro_usuario}' no existe.")
 
                 if ver_filtro_usuario and ver_filtro_usuario != "Última":
-                    query += f" AND version_dato = '{ver_filtro_usuario}'"
+                    query += f" AND \"version_dato\" = '{ver_filtro_usuario}'"
                     titulo_texto += f" [Ver: {ver_filtro_usuario}]"
                     print(f"   🔹 Procesando: {nombre_real_bd} (Filtro Ver: {ver_filtro_usuario})")
                 else: 
@@ -897,7 +959,7 @@ class ModuloVisualizador:
         self.var_fecha_ini = tk.StringVar(); self.var_fecha_fin = tk.StringVar()
         self.var_temporalidad = tk.StringVar(value="Diaria")
 
-        frame_top = ttk.Frame(self.frame_main, padding=5)
+        frame_top = ttk.Frame(self.frame_main, padding=3)  # Reducido de 5 a 3
         frame_top.pack(fill="x")
         ttk.Label(frame_top, text="BD Gráfica:").pack(side="left")
         self.lbl_db = ttk.Entry(frame_top, width=60)
@@ -908,35 +970,35 @@ class ModuloVisualizador:
 
         # --- LAYOUT OPTIMIZADO (3 COLUMNAS) ---
         frame_controls = ttk.Frame(self.frame_main)
-        frame_controls.pack(fill="x", padx=5, pady=5)
+        frame_controls.pack(fill="x", padx=5, pady=2)  # Reducido de pady=5 a pady=2
 
         # COLUMNA 1: FUENTE DE DATOS
         col1 = ttk.LabelFrame(frame_controls, text="1. Fuente de Datos")
         col1.pack(side="left", fill="both", expand=True, padx=5)
         
-        ttk.Label(col1, text="Archivo:").grid(row=0, column=0, sticky="w", pady=5, padx=5)
+        ttk.Label(col1, text="Archivo:").grid(row=0, column=0, sticky="w", pady=2, padx=5)  # Reducido de pady=5 a pady=2
         self.cb_tabla = ttk.Combobox(col1, textvariable=self.var_tabla, state="readonly", width=18)
         self.cb_tabla.grid(row=0, column=1, padx=2); self.cb_tabla.bind("<<ComboboxSelected>>", self.al_seleccionar_tabla)
 
-        ttk.Label(col1, text="Versión:").grid(row=1, column=0, sticky="w", pady=2, padx=5)
+        ttk.Label(col1, text="Versión:").grid(row=1, column=0, sticky="w", pady=1, padx=5)  # Reducido de pady=2 a pady=1
         self.cb_version = ttk.Combobox(col1, textvariable=self.var_version, state="readonly", width=18)
         self.cb_version.grid(row=1, column=1, padx=2)
 
-        ttk.Label(col1, text="Filtro 1:").grid(row=2, column=0, sticky="w", pady=2, padx=5)
-        ttk.Label(col1, text="Filtro 1:").grid(row=2, column=0, sticky="w", pady=2, padx=5)
+        ttk.Label(col1, text="Filtro 1:").grid(row=2, column=0, sticky="w", pady=1, padx=5)  # Reducido de pady=2 a pady=1
+        ttk.Label(col1, text="Filtro 1:").grid(row=2, column=0, sticky="w", pady=1, padx=5)  # Duplicado, pero mantenemos reducido
         # REEMPLAZO COMBOBOX POR CUSTOM SEARCHABLE
         self.cb_campo_filtro1 = CustomDropdownWithTooltip(col1, textvariable=self.var_campo_filtro1, width=25, command=self.al_seleccionar_campo_filtro1)
-        self.cb_campo_filtro1.entry.grid(row=2, column=1, padx=2, pady=2)
+        self.cb_campo_filtro1.entry.grid(row=2, column=1, padx=2, pady=1)  # Reducido de pady=2 a pady=1
         # self.cb_campo_filtro1.bind("<<ComboboxSelected>>", self.al_seleccionar_campo_filtro1) # YA NO SE USA BIND, SE USA COMMAND
         
         # --- CAMBIO: INTEGRACIÓN DE TOOLTIP CUSTOM DROPDOWN ---
         # Reemplazamos el Combobox de Valor 1 por la clase custom
         self.cb_valor_filtro1 = CustomDropdownWithTooltip(col1, textvariable=self.var_valor_filtro1, width=25)
-        self.cb_valor_filtro1.entry.grid(row=3, column=1, padx=2, pady=2) 
+        self.cb_valor_filtro1.entry.grid(row=3, column=1, padx=2, pady=1)  # Reducido de pady=2 a pady=1
         # --------------------------------------------------------
 
-        ttk.Label(col1, text="Filtro 2 (opc):").grid(row=4, column=0, sticky="w", pady=2, padx=5)
-        ttk.Label(col1, text="Filtro 2 (opc):").grid(row=4, column=0, sticky="w", pady=2, padx=5)
+        ttk.Label(col1, text="Filtro 2 (opc):").grid(row=4, column=0, sticky="w", pady=1, padx=5)  # Reducido de pady=2 a pady=1
+        ttk.Label(col1, text="Filtro 2 (opc):").grid(row=4, column=0, sticky="w", pady=1, padx=5)  # Duplicado, pero mantenemos reducido
         # REEMPLAZO COMBOBOX POR CUSTOM SEARCHABLE
         self.cb_campo_filtro2 = CustomDropdownWithTooltip(col1, textvariable=self.var_campo_filtro2, width=25, command=self.al_seleccionar_campo_filtro2)
         self.cb_campo_filtro2.entry.grid(row=4, column=1, padx=2)
@@ -945,36 +1007,36 @@ class ModuloVisualizador:
         # --- CAMBIO: INTEGRACIÓN DE TOOLTIP CUSTOM DROPDOWN ---
         # Reemplazamos el Combobox de Valor 2 por la clase custom
         self.cb_valor_filtro2 = CustomDropdownWithTooltip(col1, textvariable=self.var_valor_filtro2, width=25)
-        self.cb_valor_filtro2.entry.grid(row=5, column=1, padx=2, pady=5)
+        self.cb_valor_filtro2.entry.grid(row=5, column=1, padx=2, pady=2)  # Mantenemos pady=2 solo en el último elemento
         # --------------------------------------------------------
 
         # COLUMNA 2: CONFIGURACIÓN
         col2 = ttk.LabelFrame(frame_controls, text="2. Configuración")
         col2.pack(side="left", fill="both", expand=True, padx=5)
 
-        ttk.Label(col2, text="Temporalidad:").grid(row=0, column=0, sticky="w", pady=5, padx=5)
+        ttk.Label(col2, text="Temporalidad:").grid(row=0, column=0, sticky="w", pady=2, padx=5)  # Reducido de pady=5 a pady=2
         self.cb_temporalidad = ttk.Combobox(col2, textvariable=self.var_temporalidad, state="readonly", width=18)
         self.cb_temporalidad['values'] = ["Diaria", "Mensual", "Horaria (24h)"]
         self.cb_temporalidad.grid(row=0, column=1, padx=2)
         self.cb_temporalidad.bind("<<ComboboxSelected>>", self.toggle_campo_valor)
 
         self.lbl_valor = ttk.Label(col2, text="Variable:")
-        self.lbl_valor.grid(row=1, column=0, sticky="w", pady=2, padx=5)
+        self.lbl_valor.grid(row=1, column=0, sticky="w", pady=1, padx=5)  # Reducido de pady=2 a pady=1
         # REEMPLAZO COMBOBOX POR CUSTOM SEARCHABLE
         self.cb_campo_valor = CustomDropdownWithTooltip(col2, textvariable=self.var_campo_valor, width=25)
         self.cb_campo_valor.entry.grid(row=1, column=1, padx=2)
 
-        ttk.Label(col2, text="Operación:").grid(row=2, column=0, sticky="w", pady=2, padx=5)
+        ttk.Label(col2, text="Operación:").grid(row=2, column=0, sticky="w", pady=1, padx=5)  # Reducido de pady=2 a pady=1
         self.cb_agregacion = ttk.Combobox(col2, textvariable=self.var_agregacion, state="readonly", width=18)
         self.cb_agregacion['values'] = ["Valor", "Promedio", "Suma", "Máximo", "Mínimo"]; self.cb_agregacion.current(0)
         self.cb_agregacion.grid(row=2, column=1, padx=2)
 
-        ttk.Label(col2, text="Tipo:").grid(row=3, column=0, sticky="w", pady=2, padx=5)
+        ttk.Label(col2, text="Tipo:").grid(row=3, column=0, sticky="w", pady=1, padx=5)  # Reducido de pady=2 a pady=1
         self.cb_tipo = ttk.Combobox(col2, textvariable=self.var_tipo_grafico, state="readonly", width=18)
         self.cb_tipo['values'] = ["Línea", "Barras", "Área", "Dispersión"]; self.cb_tipo.current(0)
         self.cb_tipo.grid(row=3, column=1, padx=2)
 
-        ttk.Label(col2, text="Color:").grid(row=4, column=0, sticky="w", pady=2, padx=5)
+        ttk.Label(col2, text="Color:").grid(row=4, column=0, sticky="w", pady=1, padx=5)  # Reducido de pady=2 a pady=1
         self.cb_color = ttk.Combobox(col2, textvariable=self.var_color_grafico, state="readonly", width=18)
         self.cb_color['values'] = list(COLORES_GRAFICO.keys()); self.cb_color.current(0)
         self.cb_color.grid(row=4, column=1, padx=2)
@@ -983,12 +1045,12 @@ class ModuloVisualizador:
         col3 = ttk.LabelFrame(frame_controls, text="3. Periodo y Acción")
         col3.pack(side="left", fill="both", expand=True, padx=5)
 
-        ttk.Label(col3, text="Inicio:").grid(row=0, column=0, sticky="w", pady=10, padx=5)
+        ttk.Label(col3, text="Inicio:").grid(row=0, column=0, sticky="w", pady=2, padx=5)  # Reducido de pady=10 a pady=2
         self.ent_fecha_ini = ttk.Entry(col3, textvariable=self.var_fecha_ini, width=12)
         self.ent_fecha_ini.grid(row=0, column=1, padx=2)
         self.ent_fecha_ini.insert(0, config.get('viz_fecha_ini', '2025-01-01')) 
 
-        ttk.Label(col3, text="Fin:").grid(row=1, column=0, sticky="w", pady=5, padx=5)
+        ttk.Label(col3, text="Fin:").grid(row=1, column=0, sticky="w", pady=1, padx=5)  # Reducido de pady=5 a pady=1
         self.ent_fecha_fin = ttk.Entry(col3, textvariable=self.var_fecha_fin, width=12)
         self.ent_fecha_fin.grid(row=1, column=1, padx=2)
         self.ent_fecha_fin.insert(0, config.get('viz_fecha_fin', datetime.today().strftime('%Y-%m-%d')))
@@ -997,22 +1059,26 @@ class ModuloVisualizador:
         self.ent_fecha_ini.bind("<FocusOut>", self.actualizar_versiones)
         self.ent_fecha_fin.bind("<FocusOut>", self.actualizar_versiones) 
 
-        ttk.Button(col3, text="📊 GRAFICAR", command=self.generar_grafico, style="Primary.TButton").grid(row=3, column=0, columnspan=2, pady=15, sticky="ew", padx=10)
-        ttk.Button(col3, text="📥 EXCEL", command=self.exportar_datos_excel, style="Success.TButton").grid(row=4, column=0, columnspan=2, pady=5, sticky="ew", padx=10)
+        ttk.Button(col3, text="📊 GRAFICAR", command=self.generar_grafico, style="Primary.TButton").grid(row=3, column=0, columnspan=2, pady=8, sticky="ew", padx=10)  # Reducido de pady=15 a pady=8
+        ttk.Button(col3, text="📥 EXCEL", command=self.exportar_datos_excel, style="Success.TButton").grid(row=4, column=0, columnspan=2, pady=3, sticky="ew", padx=10)  # Reducido de pady=5 a pady=3
 
         # PANEL ESTADÍSTICAS
         self.frame_stats = ttk.Frame(self.frame_main)
-        self.frame_stats.pack(fill="x", padx=10, pady=2)
+        self.frame_stats.pack(fill="x", padx=10, pady=1)  # Reducido de pady=2 a pady=1
         self.lbl_stat_prom = ttk.Label(self.frame_stats, text="Promedio: --", font=('Arial', 8, 'bold'))
-        self.lbl_stat_prom.pack(side="left", padx=10)
+        self.lbl_stat_prom.pack(side="left", padx=8)  # Reducido de padx=10 a padx=8
         self.lbl_stat_max = ttk.Label(self.frame_stats, text="Max: --", font=('Arial', 8, 'bold'), foreground="green")
-        self.lbl_stat_max.pack(side="left", padx=10)
+        self.lbl_stat_max.pack(side="left", padx=8)  # Reducido de padx=10 a padx=8
         self.lbl_stat_min = ttk.Label(self.frame_stats, text="Min: --", font=('Arial', 8, 'bold'), foreground="red")
-        self.lbl_stat_min.pack(side="left", padx=10)
+        self.lbl_stat_min.pack(side="left", padx=8)  # Reducido de padx=10 a padx=8
         self.lbl_stat_sum = ttk.Label(self.frame_stats, text="Suma: --", font=('Arial', 8, 'bold'), foreground="blue")
-        self.lbl_stat_sum.pack(side="left", padx=10)
+        self.lbl_stat_sum.pack(side="left", padx=8)  # Reducido de padx=10 a padx=8
 
         self.frame_plot = ttk.Frame(self.frame_main)
+        # Reservar altura fija moderada para que ni título ni gráfico se recorten
+        self.frame_plot.config(height=400)
+        # Permitimos que el contenido se ajuste dentro del área reservada
+        self.frame_plot.pack_propagate(True)
         self.frame_plot.pack(fill="both", expand=True, padx=10, pady=5)
         
         if os.path.exists(self.ruta_db): self.cargar_tablas()
@@ -1273,8 +1339,24 @@ class ModuloVisualizador:
                 elif operacion == "Valor": df['Res'] = df[cols_horas].mean(axis=1) # Equivale a promedio en 24h
                 serie_graficar = df.groupby('Fecha')['Res'].mean()
             else:
-                col_val = self.var_campo_valor.get(); 
-                if not col_val: return
+                col_val = self.var_campo_valor.get()
+                # Fallback: si el usuario no eligió variable, intentar autoseleccionar la primera columna numérica
+                if not col_val:
+                    # Excluir columnas de control
+                    excl = {'anio', 'mes_dia', 'version_dato', 'fecha'}
+                    candidatos = [c for c in df.columns if c.lower() not in excl]
+                    # Mantener solo columnas convertibles a numérico
+                    for c in candidatos:
+                        col_tmp = pd.to_numeric(df[c], errors='coerce')
+                        if not col_tmp.dropna().empty:
+                            col_val = c
+                            # Reflejar selección en la UI
+                            self.var_campo_valor.set(col_val)
+                            break
+                    if not col_val:
+                        messagebox.showwarning("Selecciona variable", "Elige una variable para graficar.")
+                        return
+                # A partir de aquí col_val está definido
                 df[col_val] = pd.to_numeric(df[col_val], errors='coerce')
 
                 # LOGICA MENSUAL O DIARIA
@@ -1356,9 +1438,9 @@ class ModuloVisualizador:
         for widget in self.frame_plot.winfo_children(): widget.destroy()
         
         # --- ESTILO LIMPIO Y MODERNO ---
-        fig = Figure(figsize=(8, 4), dpi=100, facecolor='#ffffff')
-        # Ajuste de margenes para evitar recorte de titulo
-        fig.subplots_adjust(top=0.85, bottom=0.15, left=0.10, right=0.95)
+        fig = Figure(figsize=(8, 4.1), dpi=100, facecolor='#ffffff')
+        # Ajuste de márgenes para evitar recorte de título sin empujar el gráfico hacia arriba
+        fig.subplots_adjust(top=0.88, bottom=0.14, left=0.10, right=0.95)
         
         ax = fig.add_subplot(111)
         ax.set_facecolor('#ffffff')
@@ -1445,10 +1527,15 @@ class ModuloVisualizador:
         fig.canvas.mpl_connect("motion_notify_event", hover)
         canvas = FigureCanvasTkAgg(fig, master=self.frame_plot)
         canvas.draw()
-        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+        
+        # Toolbar primero (en la parte inferior del frame_plot)
         toolbar = NavigationToolbar2Tk(canvas, self.frame_plot)
         toolbar.update()
-        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+        toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+        
+        # Canvas después, con expand para usar el espacio disponible pero respetando el monitor
+        # El monitor ya está reservado en la parte inferior de la ventana principal
+        canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
 # =============================================================================
 #  INTERFAZ GRÁFICA PRINCIPAL (ROBOT + TABS)
@@ -1466,11 +1553,71 @@ class AplicacionXM:
 
         self.construir_encabezado_logo()
 
+        # Monitor mejorado con estilo moderno - EMPAQUETAR PRIMERO EN LA PARTE INFERIOR
+        # Esto asegura que tenga espacio reservado y no desaparezca
+        console_container = tk.Frame(root, bg="#1e293b")
+        console_container.pack(side="bottom", fill="x", expand=False, padx=10, pady=5)
+        
+        # Header de la consola
+        header_frame = tk.Frame(console_container, bg="#1e293b", height=35)
+        header_frame.pack(fill="x", side="top")
+        
+        title_label = tk.Label(
+            header_frame,
+            text=">_ Monitor de Ejecución",
+            font=("Segoe UI", 10, "bold"),
+            bg="#1e293b",
+            fg="white",
+            anchor="w"
+        )
+        title_label.pack(side="left", padx=15, pady=8)
+        
+        # Botón limpiar consola
+        def limpiar_consola():
+            self.txt_console.config(state="normal")
+            self.txt_console.delete(1.0, tk.END)
+            self.txt_console.config(state="disabled")
+        
+        btn_clear = tk.Button(
+            header_frame,
+            text="🗑️ Limpiar",
+            command=limpiar_consola,
+            bg="#374151",
+            fg="white",
+            font=("Segoe UI", 9),
+            relief="flat",
+            padx=10,
+            pady=5,
+            cursor="hand2"
+        )
+        btn_clear.pack(side="right", padx=10, pady=5)
+        
+        # Área de texto con fondo más oscuro y verde más suave
+        # Altura fija para asegurar que siempre sea visible
+        self.txt_console = scrolledtext.ScrolledText(
+            console_container,
+            height=8,
+            state='disabled',
+            bg='#0f172a',  # Más oscuro
+            fg='#22c55e',  # Verde más suave
+            font=('Consolas', 10),
+            insertbackground='#22c55e',
+            selectbackground='#374151',
+            selectforeground='white',
+            wrap='word',
+            relief='flat',
+            borderwidth=0
+        )
+        self.txt_console.pack(fill="x", expand=False, padx=0, pady=0)  # Solo fill="x", no expand
+        sys.stdout = PrintRedirector(self.txt_console)
+
+        # Ahora empaquetar el tab_control DESPUÉS del monitor
+        # Esto asegura que respete el espacio del monitor
         tab_control = ttk.Notebook(root)
-        self.tab_general = tk.Frame(tab_control, bg="#f4f6f7")
-        self.tab_archivos = tk.Frame(tab_control, bg="#f4f6f7")
-        self.tab_filtros = tk.Frame(tab_control, bg="#f4f6f7")
-        self.tab_visualizador = tk.Frame(tab_control, bg="#f4f6f7")
+        self.tab_general = tk.Frame(tab_control, bg="#f8fafc")  # Fondo mejorado
+        self.tab_archivos = tk.Frame(tab_control, bg="#f8fafc")
+        self.tab_filtros = tk.Frame(tab_control, bg="#f8fafc")
+        self.tab_visualizador = tk.Frame(tab_control, bg="#f8fafc")
         
         # Iconos originales restaurados
         tab_control.add(self.tab_general, text='🔧 Configuración')
@@ -1478,9 +1625,8 @@ class AplicacionXM:
         tab_control.add(self.tab_filtros, text='📋 Filtros Reporte')
         tab_control.add(self.tab_visualizador, text='📈 Visualizador')
         
-        # Eliminar bordes del Notebook container para look "clean"
-        # Esto requiere soporte en configurar_estilos_modernos (Ver paso siguiente)
-        tab_control.pack(expand=1, fill="both", padx=10, pady=5)
+        # Empaquetar el tab_control DESPUÉS del monitor para que respete su espacio
+        tab_control.pack(expand=True, fill="both", padx=10, pady=5)
 
         self.crear_tab_general()
         self.crear_tab_archivos()
@@ -1488,12 +1634,6 @@ class AplicacionXM:
         
         # --- PASAMOS LA CONFIG AL VISUALIZADOR ---
         self.app_visualizador = ModuloVisualizador(self.tab_visualizador, self.config)
-
-        # Monitor (Estilo minimalista)
-        tk.Label(root, text=">_ Monitor de Ejecución", font=("Segoe UI", 9, "bold"), fg="#374151").pack(anchor="w", padx=15, pady=(5,0))
-        self.txt_console = scrolledtext.ScrolledText(root, height=8, state='disabled', bg='black', fg='#00FF00', font=('Consolas', 9))
-        self.txt_console.pack(fill="both", expand=False, padx=10, pady=5)
-        sys.stdout = PrintRedirector(self.txt_console)
         
         # Cargar valores iniciales en dashboard (al final de todo)
         self.actualizar_dashboard()
@@ -1540,21 +1680,24 @@ class AplicacionXM:
         return True
 
     def add_placeholder(self, entry, text):
-        """Agrega comportamiento de placeholder a un Entry"""
+        """Agrega comportamiento de placeholder mejorado a un Entry"""
         entry.insert(0, text)
-        try: entry.configure(foreground="#95a5a6") # Gris placeholder
+        try: 
+            entry.configure(foreground="#94a3b8", font=("Segoe UI", 11, "italic"))  # Color placeholder mejorado
         except: pass
         
         def on_focus_in(event):
             if entry.get() == text:
                 entry.delete(0, tk.END)
-                try: entry.configure(foreground="#2c3e50") # Color normal
+                try: 
+                    entry.configure(foreground="#1e293b", font=("Segoe UI", 11))  # Color normal mejorado
                 except: pass
         
         def on_focus_out(event):
             if not entry.get():
                 entry.insert(0, text)
-                try: entry.configure(foreground="#95a5a6")
+                try: 
+                    entry.configure(foreground="#94a3b8", font=("Segoe UI", 11, "italic"))
                 except: pass
         
         entry.bind("<FocusIn>", on_focus_in)
@@ -1563,96 +1706,273 @@ class AplicacionXM:
     def configurar_estilos_modernos(self):
         style = ttk.Style()
         style.theme_use('clam')
+        style.configure("TLabel", font=("Segoe UI Semibold", 10), background="#ffffff")
+
         
-        # --- PALETA DE COLORES ENERCONSULT ---
-        c_azul_corp = "#0093d0"
-        c_verde_corp = "#8cc63f"
-        c_fondo = "#f4f6f7"
-        c_blanco = "#ffffff"
-        c_texto = "#2c3e50"
-        c_gris_claro = "#ecf0f1"
+        # --- PALETA DE COLORES MEJORADA ENERCONSULT ---
+        c_azul_primario = "#0093d0"
+        c_azul_hover = "#007bb5"
+        c_azul_claro = "#e0f2fe"
+        c_verde_primario = "#8cc63f"
+        c_verde_hover = "#7ab828"
+        c_fondo_principal = "#f8fafc"  # Más claro y moderno
+        c_fondo_secundario = "#ffffff"
+        c_borde_claro = "#e2e8f0"
+        c_texto_primario = "#1e293b"  # Más oscuro para mejor contraste
+        c_texto_secundario = "#64748b"
+        c_texto_placeholder = "#94a3b8"
+        c_exito = "#10b981"
+        c_error = "#ef4444"
+        c_gris_header = "#f1f5f9"  # Para headers de tablas y pestañas
 
-        self.root.configure(bg=c_fondo)
+        self.root.configure(bg=c_fondo_principal)
 
-        # --- FUENTES ---
-        f_main = ("Segoe UI", 10)
-        f_head = ("Segoe UI Semibold", 11)
+        # --- FUENTES MEJORADAS ---
+        f_h1 = ("Segoe UI", 24, "bold")
+        f_h2 = ("Segoe UI", 18, "bold")
+        f_h3 = ("Segoe UI", 14, "bold")
+        f_main = ("Segoe UI", 11)  # Aumentado de 10 a 11
+        f_head = ("Segoe UI", 11, "bold")  # Más consistente
         f_title = ("Segoe UI", 12, "bold")
+        f_small = ("Segoe UI", 9)
+        f_mono = ("Consolas", 10)
 
         # --- CONFIG GENERAL ---
-        style.configure(".", background=c_fondo, foreground=c_texto, font=f_main)
-        style.configure("TFrame", background=c_fondo)
-        style.configure("TLabelframe", background=c_fondo, borderwidth=1, relief="solid")
-        style.configure("TLabelframe.Label", background=c_fondo, foreground=c_azul_corp, font=f_title)
+        style.configure(".", background=c_fondo_principal, foreground=c_texto_primario, font=f_main)
+        style.configure("TFrame", background=c_fondo_principal)
+        style.configure("TLabelframe", 
+            background=c_fondo_secundario, 
+            borderwidth=1, 
+            relief="solid",
+            bordercolor=c_borde_claro
+        )
+        style.configure("TLabelframe.Label", 
+            background=c_fondo_secundario, 
+            foreground=c_azul_primario, 
+            font=f_title
+        )
         
-        # --- PESTAÑAS (NOTEBOOK) MODERNAS ---
-        # borderwidth=0 y relief='flat' para eliminar bordes
-        style.configure("TNotebook", background=c_fondo, borderwidth=0, tabmargins=[0, 0, 0, 0], relief="flat")
-        style.configure("TNotebook.Tab", padding=[15, 8], font=f_head, background=c_gris_claro, foreground="#7f8c8d", borderwidth=0, relief="flat")
+        # --- PESTAÑAS (NOTEBOOK) MEJORADAS ---
+        style.configure("TNotebook", 
+            background=c_fondo_principal, 
+            borderwidth=0, 
+            tabmargins=[0, 0, 0, 0], 
+            relief="flat"
+        )
+        style.configure("TNotebook.Tab", 
+            padding=[20, 12],  # Más espacioso (antes 15, 8)
+            font=("Segoe UI Semibold", 11),
+            background=c_gris_header,  # Gris muy claro para hover
+            foreground=c_texto_secundario,
+            borderwidth=0,
+            relief="flat"
+        )
         style.map("TNotebook.Tab", 
-            background=[("selected", c_blanco), ("active", "#dfe6e9")],
-            foreground=[("selected", c_azul_corp), ("active", c_azul_corp)],
-            expand=[("selected", [0, 0, 0, 0])] # Eliminar expansión visual de borde
+            background=[
+                ("selected", c_fondo_secundario),  # Blanco cuando está seleccionada
+                ("active", c_gris_header)  # Gris claro al pasar mouse
+            ],
+            foreground=[
+                ("selected", c_azul_primario),  # Azul cuando está seleccionada
+                ("active", c_azul_primario)
+            ],
+            expand=[("selected", [0, 0, 0, 0])]
         )
 
-        # --- BOTONES MODERNOS ---
-        # Botón Primario (Azul)
-        style.configure("Primary.TButton", font=f_head, background=c_azul_corp, foreground="white", borderwidth=0, focuscolor=c_azul_corp)
-        style.map("Primary.TButton", background=[("active", "#007bb5"), ("disabled", "#bdc3c7")])
+        # --- BOTONES MEJORADOS CON ESTILO MODERNO ---
+        # Botón Primario (Azul) - Más grande y con mejor padding
+        style.configure("Primary.TButton", 
+            font=("Segoe UI Semibold", 11),
+            background=c_azul_primario,
+            foreground="white",
+            borderwidth=0,
+            focuscolor="none",
+            padding=[18, 14]  # Padding aumentado para look más moderno
+        )
+        style.map("Primary.TButton", 
+            background=[
+                ("active", c_azul_hover),
+                ("pressed", "#006a9c"),  # Color más oscuro al presionar
+                ("disabled", "#cbd5e1")
+            ]
+        )
         
         # Botón Success (Verde)
-        style.configure("Success.TButton", font=f_head, background=c_verde_corp, foreground="white", borderwidth=0, focuscolor=c_verde_corp)
-        style.map("Success.TButton", background=[("active", "#7ab828"), ("disabled", "#bdc3c7")])
+        style.configure("Success.TButton", 
+            font=("Segoe UI", 11, "bold"),
+            background=c_verde_primario,
+            foreground="white",
+            borderwidth=0,
+            focuscolor="none",
+            padding=[18, 14]  # Padding aumentado
+        )
+        style.map("Success.TButton", 
+            background=[
+                ("active", c_verde_hover),
+                ("pressed", "#6a9a1f"),  # Color más oscuro al presionar
+                ("disabled", "#cbd5e1")
+            ]
+        )
 
-        # Botón Danger (Rojo - Nuevo)
-        style.configure("Danger.TButton", font=f_head, background="#e74c3c", foreground="white", borderwidth=0, focuscolor="#e74c3c")
-        style.map("Danger.TButton", background=[("active", "#c0392b"), ("disabled", "#bdc3c7")])
+        # Botón Danger (Rojo)
+        style.configure("Danger.TButton", 
+            font=("Segoe UI", 11, "bold"),
+            background=c_error,
+            foreground="white",
+            borderwidth=0,
+            focuscolor="none",
+            padding=[18, 14]  # Padding aumentado
+        )
+        style.map("Danger.TButton", 
+            background=[
+                ("active", "#dc2626"),
+                ("pressed", "#b91c1c"),  # Color más oscuro al presionar
+                ("disabled", "#cbd5e1")
+            ]
+        )
 
         # Botón Neutro (Gris/Default)
-        style.configure("TButton", font=f_main, padding=5)
+        style.configure("TButton", font=f_main, padding=[12, 8])
 
-        # --- TREEVIEW (TABLAS) ---
+        # --- TREEVIEW (TABLAS) MEJORADAS ---
         style.configure("Treeview", 
-            background=c_blanco, 
-            foreground=c_texto, 
-            fieldbackground=c_blanco, 
-            rowheight=25, 
+            background=c_fondo_secundario,
+            foreground=c_texto_primario,
+            fieldbackground=c_fondo_secundario,
+            rowheight=32,  # Más alto para mejor legibilidad (antes 25)
             font=f_main,
-            borderwidth=1, relief="solid"
+            borderwidth=1,
+            relief="solid",
+            bordercolor=c_borde_claro
         )
-        style.configure("Treeview.Heading", font=f_head, background="#dfe6e9", foreground=c_texto, padding=5)
-        style.map("Treeview", background=[("selected", c_azul_corp)], foreground=[("selected", "white")])
+        style.configure("Treeview.Heading", 
+            font=("Segoe UI", 11, "bold"),
+            background=c_gris_header,  # Header con fondo gris claro
+            foreground=c_texto_primario,
+            padding=[12, 8],  # Más padding (antes 5)
+            relief="flat"
+        )
+        style.map("Treeview", 
+            background=[
+                ("selected", c_azul_primario),
+                ("!selected", c_fondo_secundario)
+            ],
+            foreground=[
+                ("selected", "white"),
+                ("!selected", c_texto_primario)
+            ]
+        )
 
-        # --- ENTRADAS ---
-        style.configure("TEntry", padding=5, relief="flat", borderwidth=1)
+        # --- ENTRADAS MEJORADAS CON ESTILO MODERNO ---
+        style.configure("TEntry", 
+            padding=[12, 10],  # Más padding interno
+            relief="flat",  # Sin relieve para look moderno
+            borderwidth=1,
+            bordercolor=c_borde_claro,
+            fieldbackground=c_fondo_secundario
+        )
+        style.map("TEntry", 
+            bordercolor=[
+                ("focus", c_azul_primario),  # Borde azul al enfocar
+                ("!focus", c_borde_claro)
+            ],
+            lightcolor=[
+                ("focus", c_azul_claro)  # Resplandor suave al enfocar
+            ]
+        )
         
-        # --- SCROLLBAR ---
-        style.configure("Vertical.TScrollbar", background=c_gris_claro, troughcolor=c_fondo, borderwidth=0, arrowsize=12)
+        # Estilo para Entry con aspecto más moderno (simula bordes redondeados visualmente)
+        style.configure("Modern.TEntry",
+            padding=[14, 11],  # Padding extra para look más espacioso
+            relief="flat",
+            borderwidth=2,  # Borde más grueso para mejor visibilidad
+            bordercolor=c_borde_claro,
+            fieldbackground=c_fondo_secundario
+        )
+        style.map("Modern.TEntry",
+            bordercolor=[
+                ("focus", c_azul_primario),
+                ("!focus", c_borde_claro)
+            ]
+        )
+        
+        # --- SCROLLBAR MEJORADA ---
+        style.configure("Vertical.TScrollbar", 
+            background="#cbd5e1",
+            troughcolor=c_fondo_principal,
+            borderwidth=0,
+            arrowsize=14,
+            width=14
+        )
+        style.map("Vertical.TScrollbar", 
+            background=[
+                ("active", "#94a3b8"),
+                ("!active", "#cbd5e1")
+            ]
+        )
 
-        # --- CARD STYLES (RECOMENDADOS) ---
-        style.configure("Card.TFrame", background=c_blanco, relief="flat")
-        style.configure("CardHeader.TFrame", background=c_blanco)
-        style.configure("CardTitle.TLabel", font=("Segoe UI Semibold", 11), background=c_blanco, foreground=c_azul_corp)
-        style.configure("CardIcon.TLabel", background=c_blanco)
-        style.configure("CardBody.TFrame", background=c_blanco)
+        # --- CARD STYLES MEJORADOS CON BORDES SUTILES ---
+        style.configure("Card.TFrame", 
+            background=c_fondo_secundario,
+            relief="flat",
+            borderwidth=1,  # Borde sutil
+            bordercolor=c_borde_claro
+        )
+        style.configure("CardHeader.TFrame", 
+            background="#fafbfc"  # Fondo ligeramente diferente
+        )
+        style.configure("CardTitle.TLabel", 
+            font=("Segoe UI", 14, "bold"),
+            background="#fafbfc",
+            foreground=c_azul_primario
+        )
+        style.configure("CardIcon.TLabel", 
+            font=("Segoe UI", 16),  # Aumentado de 15 a 16
+            foreground=c_azul_primario,
+            background="#fafbfc"
+        )
+        style.configure("CardBody.TFrame", 
+            background=c_fondo_secundario
+        )
 
     def construir_encabezado_logo(self):
-        frame_header = tk.Frame(self.root, bg="white", height=100)
+        # Frame principal con altura reducida y fondo azul muy claro
+        frame_header = tk.Frame(self.root, bg="#f0f9ff", height=70)  # Altura reducida de 120 a 70
         frame_header.pack(fill="x", side="top")
+        
+        # Frame interno para contenido horizontal (logo y texto lado a lado)
+        frame_content = tk.Frame(frame_header, bg="#f0f9ff")
+        frame_content.pack(expand=True, fill="both", pady=10)
+        
         script_dir = os.path.dirname(os.path.abspath(__file__))
         ruta_logo = os.path.join(script_dir, LOGO_FILENAME)
         
         if TIENE_PILLOW and os.path.exists(ruta_logo):
             try:
                 pil_img = Image.open(ruta_logo)
-                base_height = 60
+                base_height = 50  # Reducido de 80 a 50 para ahorrar espacio
                 w_percent = (base_height / float(pil_img.size[1]))
                 w_size = int((float(pil_img.size[0]) * float(w_percent)))
-                pil_img = pil_img.resize((w_size, base_height), Image.Resampling.LANCZOS)
+                pil_img = pil_img.resize((w_size, base_height), RESAMPLE_LANCZOS)
                 self.logo_img = ImageTk.PhotoImage(pil_img)
-                lbl_logo = tk.Label(frame_header, image=self.logo_img, bg="white")
-                lbl_logo.pack(pady=10)
-            except Exception as e: print(f"⚠️ Error logo: {e}")
+                lbl_logo = tk.Label(frame_content, image=self.logo_img, bg="#f0f9ff")
+                lbl_logo.pack(side="left", padx=20)  # Logo a la izquierda
+                
+                # Título al lado del logo (horizontal)
+                lbl_title = tk.Label(
+                    frame_content, 
+                    text="-    Suite Inteligente", 
+                    bg="#f0f9ff",
+                    fg="#0093d0",
+                    font=("Segoe UI", 16, "bold")  # Tamaño aumentado para compensar posición horizontal
+                )
+                lbl_title.pack(side="left", padx=15)  # Texto al lado del logo
+            except Exception as e: 
+                print(f"⚠️ Error logo: {e}")
+        
+        # Línea separadora sutil
+        separator = tk.Frame(self.root, bg="#e2e8f0", height=1)
+        separator.pack(fill="x", side="top")
 
     # --- MÉTODOS VISUALES LEGACY ELIMINADOS (v03 utiliza ttk + estilos) ---
     def create_styled_label(self, parent, text, font=("Segoe UI Semibold", 9)):
@@ -1664,9 +1984,9 @@ class AplicacionXM:
 
     def crear_tab_general(self):
         # -- CONTENEDOR PRINCIPAL --
-        self.tab_general.configure(bg="#f4f6f7") 
+        self.tab_general.configure(bg="#f8fafc")  # Fondo mejorado 
         
-        main_container = tk.Frame(self.tab_general, bg="#f4f6f7")
+        main_container = tk.Frame(self.tab_general, bg="#f8fafc")
         main_container.pack(fill="both", expand=True, padx=20, pady=10) # Minimal padding
 
         # =========================================================
@@ -1728,7 +2048,7 @@ class AplicacionXM:
         # =========================================================
         # SECCIÓN 2: BOTONES DE ACCIÓN
         # =========================================================
-        row_actions = tk.Frame(main_container, bg="#f4f6f7")
+        row_actions = tk.Frame(main_container, bg="#f8fafc")
         row_actions.pack(pady=(0, 10))
         
         def create_action_btn(parent, text, icon, color, command):
@@ -1737,12 +2057,12 @@ class AplicacionXM:
             elif color == "red": style = "Danger.TButton"
             
             full_text = f"{icon}  {text}" if icon else text
-            return RoundedButtonWrapper(parent, text=full_text, style=style, command=command, width=25)
+            return RoundedButtonWrapper(parent, text=full_text, style=style, command=command, width=30)
 
         self.btn_guardar = create_action_btn(row_actions, "GUARDAR CONFIG", "📁", "green", self.guardar_config)
         self.btn_guardar.grid(row=0, column=0, padx=10)
 
-        self.btn_descargar = create_action_btn(row_actions, "EJECUTAR DESCARGA", " ▶️", "blue", self.run_descarga)
+        self.btn_descargar = create_action_btn(row_actions, "EJECUTAR DESCARGA", "⏬", "blue", self.run_descarga)
         self.btn_descargar.grid(row=0, column=1, padx=10)
         
         self.btn_reporte = create_action_btn(row_actions, "GENERAR REPORTE", "📊", "blue", self.run_reporte)
@@ -1751,13 +2071,13 @@ class AplicacionXM:
         # =========================================================
         # SECCIÓN 3: DASHBOARD
         # =========================================================
-        self.frame_dashboard = tk.Frame(main_container, bg="#f4f6f7")
+        self.frame_dashboard = tk.Frame(main_container, bg="#f8fafc")
         self.frame_dashboard.pack(fill="both", expand=True)
         self.actualizar_dashboard()
 
     def crear_tab_archivos(self):
-        self.tab_archivos.configure(bg="#f4f6f7")
-        main_container = tk.Frame(self.tab_archivos, bg="#f4f6f7")
+        self.tab_archivos.configure(bg="#f8fafc")
+        main_container = tk.Frame(self.tab_archivos, bg="#f8fafc")
         main_container.pack(fill="both", expand=True, padx=20, pady=10) # Reduced padding
 
         # --- TARJETA 1: INPUTS ---
@@ -1806,8 +2126,14 @@ class AplicacionXM:
         scrollbar.pack(side="right", fill="y")
         self.tree_files.configure(yscrollcommand=scrollbar.set)
         
-        for i in self.config.get('archivos_descarga', []): 
-            self.tree_files.insert("", "end", values=(i['nombre_base'], i['ruta_remota'], "🗑️"))
+        # Configurar tags para filas alternadas
+        self.tree_files.tag_configure("even", background="#ffffff")
+        self.tree_files.tag_configure("odd", background="#f8fafc")
+        
+        # Insertar datos con colores alternados
+        for idx, i in enumerate(self.config.get('archivos_descarga', [])):
+            tags = ("even",) if idx % 2 == 0 else ("odd",)
+            self.tree_files.insert("", "end", values=(i['nombre_base'], i['ruta_remota'], "🗑️"), tags=tags)
 
         def on_tree_click(event):
             region = self.tree_files.identify("region", event.x, event.y)
@@ -1832,12 +2158,12 @@ class AplicacionXM:
         self.lbl_info_files_summary = lbl_info_text
 
     def crear_tab_filtros(self):
-        self.tab_filtros.configure(bg="#f4f6f7")
-        main_container = tk.Frame(self.tab_filtros, bg="#f4f6f7")
+        self.tab_filtros.configure(bg="#f8fafc")
+        main_container = tk.Frame(self.tab_filtros, bg="#f8fafc")
         main_container.pack(fill="both", expand=True, padx=20, pady=10) # Reduced padding
 
         # --- TARJETA 1: INPUTS (GRID 4 COLUMNAS) ---
-        fr_card_input = tk.Frame(main_container, bg="#f4f6f7")
+        fr_card_input = tk.Frame(main_container, bg="#f8fafc")
         fr_card_input.pack(fill="x", pady=(0, 10))
         
         card_input = Card(fr_card_input)
@@ -1892,7 +2218,7 @@ class AplicacionXM:
         small_btn("▼", self.move_down)
 
         # --- TARJETA 2: LISTADO ---
-        fr_card_list = tk.Frame(main_container, bg="#f4f6f7")
+        fr_card_list = tk.Frame(main_container, bg="#f8fafc")
         fr_card_list.pack(fill="both", expand=True, pady=(0, 10))
         
         card_list = Card(fr_card_list, fill_height=True)
@@ -1920,8 +2246,14 @@ class AplicacionXM:
         scrollbar.pack(side="right", fill="y")
         self.tree_filtros.configure(yscrollcommand=scrollbar.set)
         
-        for i in self.config.get('filtros_reporte', []):
-            self.tree_filtros.insert("", "end", values=(i['tabla'], i.get('campo',''), i.get('valor',''), i.get('version',''), "🗑️"))
+        # Configurar tags para filas alternadas
+        self.tree_filtros.tag_configure("even", background="#ffffff")
+        self.tree_filtros.tag_configure("odd", background="#f8fafc")
+        
+        # Insertar datos con colores alternados
+        for idx, i in enumerate(self.config.get('filtros_reporte', [])):
+            tags = ("even",) if idx % 2 == 0 else ("odd",)
+            self.tree_filtros.insert("", "end", values=(i['tabla'], i.get('campo',''), i.get('valor',''), i.get('version',''), "🗑️"), tags=tags)
 
         # Binding Doble Click
         self.tree_filtros.bind("<Button-1>", lambda e: self.del_filtro() if self.tree_filtros.identify_column(e.x) == "#5" else None)
@@ -1964,7 +2296,10 @@ class AplicacionXM:
         ph_rut = "ej: /Reportes/Predespacho"
         
         if nom and rut and nom != ph_nom and rut != ph_rut:
-            self.tree_files.insert("", "end", values=(nom, rut, "🗑️"))
+            # Determinar tag para fila alternada
+            num_items = len(self.tree_files.get_children())
+            tags = ("even",) if num_items % 2 == 0 else ("odd",)
+            self.tree_files.insert("", "end", values=(nom, rut, "🗑️"), tags=tags)
             
             # Reset a placeholder
             self.ent_f_nom.delete(0, tk.END); self.ent_f_nom.insert(0, ph_nom); self.ent_f_nom.configure(fg="#95a5a6")
@@ -1997,7 +2332,10 @@ class AplicacionXM:
             val_c = c if c != ph_c else ""
             val_v = v if v != ph_v else ""
             
-            self.tree_filtros.insert("", "end", values=(t, val_c, val_v, self.cb_r_ver.get(), "🗑️"))
+            # Determinar tag para fila alternada
+            num_items = len(self.tree_filtros.get_children())
+            tags = ("even",) if num_items % 2 == 0 else ("odd",)
+            self.tree_filtros.insert("", "end", values=(t, val_c, val_v, self.cb_r_ver.get(), "🗑️"), tags=tags)
             
             # Reset
             self.ent_r_tab.delete(0, tk.END); self.ent_r_tab.insert(0, ph_t); self.ent_r_tab.configure(fg="#95a5a6")
@@ -2050,6 +2388,50 @@ class AplicacionXM:
             self.actualizar_dashboard()
         except Exception as e: print(f"❌ Error guardando: {e}")
 
+    def crear_metric_card(self, parent, icon, value, label, color="#0093d0"):
+        """Crea una tarjeta de métrica destacada"""
+        card = tk.Frame(parent, bg="#ffffff", relief="flat", bd=0)
+        
+        # Frame interno con padding
+        inner = tk.Frame(card, bg="#ffffff")
+        inner.pack(fill="both", expand=True, padx=20, pady=20)
+        
+        # Icono grande
+        icon_label = tk.Label(
+            inner, 
+            text=icon, 
+            font=("Segoe UI", 32),
+            bg="#ffffff",
+            fg=color
+        )
+        icon_label.pack(side="left", padx=(0, 15))
+        
+        # Frame para texto
+        text_frame = tk.Frame(inner, bg="#ffffff")
+        text_frame.pack(side="left", fill="both", expand=True)
+        
+        # Valor destacado
+        value_label = tk.Label(
+            text_frame,
+            text=str(value),
+            font=("Segoe UI", 24, "bold"),
+            bg="#ffffff",
+            fg="#1e293b"
+        )
+        value_label.pack(anchor="w")
+        
+        # Etiqueta
+        label_label = tk.Label(
+            text_frame,
+            text=label,
+            font=("Segoe UI", 10),
+            bg="#ffffff",
+            fg="#64748b"
+        )
+        label_label.pack(anchor="w")
+        
+        return card
+
     def actualizar_dashboard(self):
         # 0. Limpiar previo
         for w in self.frame_dashboard.winfo_children(): w.destroy()
@@ -2067,46 +2449,52 @@ class AplicacionXM:
         db_size = f"{os.path.getsize(db_path)/(1024*1024):.2f} MB" if db_exists else "0 MB"
         db_time = datetime.fromtimestamp(os.path.getmtime(db_path)).strftime('%Y-%m-%d %H:%M') if db_exists else "--"
         
-        # 2. Construir Layout 2 Columnas (Estilo Card)
+        # 2. Construir Layout Grid con métricas destacadas
         
-        # Panel Izquierdo: Métricas
-        col_metrics = tk.Frame(self.frame_dashboard, bg="#f4f6f7")
-        col_metrics.pack(side="left", fill="both", expand=True, padx=(0, 10))
+        # Contenedor con grid de 3 columnas
+        grid_container = tk.Frame(self.frame_dashboard, bg="#f8fafc")
+        grid_container.pack(fill="both", expand=True, padx=20, pady=20)
         
-        card_metrics = Card(col_metrics, title="Estado del Sistema")
-        card_metrics.pack(fill="both", expand=True)
-        content_metrics = card_metrics.get_body()
-
-        # Items con Iconos
-        def add_stat_row(parent, icon, title, value, color_val="#2c3e50"):
-            row = tk.Frame(parent, bg="#ffffff")
-            row.pack(fill="x", pady=5)
-            tk.Label(row, text=icon, font=("Arial", 12), bg="#ffffff").pack(side="left", padx=5)
-            tk.Label(row, text=title, font=("Segoe UI", 9, "bold"), bg="#ffffff", fg="#6b7280").pack(side="left")
-            tk.Label(row, text=value, font=("Segoe UI Semibold", 10), bg="#ffffff", fg=color_val).pack(side="right", padx=10)
-
-        add_stat_row(content_metrics, "💾", "Base de Datos", db_size, "#16a34a" if db_exists else "#dc2626") 
-        add_stat_row(content_metrics, "📅", "Última Modificación", db_time)
-        add_stat_row(content_metrics, "📥", "Archivos Configurados", str(n_files))
-        add_stat_row(content_metrics, "📋", "Filtros Reporte", str(n_filters))
-
-        # Panel Derecho: Flujo de Trabajo
-        col_flow = tk.Frame(self.frame_dashboard, bg="#f4f6f7")
-        col_flow.pack(side="left", fill="both", expand=True, padx=(10, 0))
+        # Configurar grid de 3 columnas
+        for i in range(3):
+            grid_container.columnconfigure(i, weight=1, uniform="metric")
         
-        card_flow = Card(col_flow, title="Flujo de Trabajo", icon="🚀")
-        card_flow.pack(fill="both", expand=True)
-        content_flow = card_flow.get_body()
+        # Crear tarjetas de métricas destacadas
+        card1 = self.crear_metric_card(grid_container, "💾", db_size, "Base de Datos", "#0093d0" if db_exists else "#ef4444")
+        card1.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
         
-        # Diagrama Visual Simple
-        flow_diagram = tk.Label(content_flow, text="FTP XM  ➔  📥 Descarga  ➔  💾 BD  ➔  📈 Visualizador", 
-                                font=("Segoe UI Symbol", 12, "bold"), bg="#ffffff", fg="#0093d0", justify="center")
-        flow_diagram.pack(fill="both", expand=True, padx=10, pady=(20, 10))
+        card2 = self.crear_metric_card(grid_container, "📥", n_files, "Archivos Configurados", "#8cc63f")
+        card2.grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
         
-        guide_text = ("1. Configura credenciales y fechas.\n"
-                      "2. Presiona 'EJECUTAR' para actualizar todo.\n"
-                      "3. Genera Reportes o visualiza gráficos.")
-        tk.Label(content_flow, text=guide_text, font=("Segoe UI", 9), bg="#ffffff", fg="#6b7280", justify="center").pack(pady=10)
+        card3 = self.crear_metric_card(grid_container, "📋", n_filters, "Filtros Reporte", "#f59e0b")
+        card3.grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
+        
+        # Panel de información adicional (debajo de las métricas)
+        info_frame = tk.Frame(grid_container, bg="#f8fafc")
+        info_frame.grid(row=1, column=0, columnspan=3, sticky="ew", padx=10, pady=(0, 10))
+        
+        # Información de última modificación
+        if db_exists:
+            info_text = f"Última modificación: {db_time}"
+            info_label = tk.Label(
+                info_frame,
+                text=info_text,
+                font=("Segoe UI", 10),
+                bg="#f8fafc",
+                fg="#64748b"
+            )
+            info_label.pack(side="left", padx=10)
+        
+        # Flujo de trabajo
+        flow_text = "FTP XM  ➔  📥 Descarga  ➔  💾 BD  ➔  📈 Visualizador"
+        flow_label = tk.Label(
+            info_frame,
+            text=flow_text,
+            font=("Segoe UI", 11, "bold"),
+            bg="#f8fafc",
+            fg="#0093d0"
+        )
+        flow_label.pack(side="right", padx=10)
 
     def cargar_config(self):
         if os.path.exists(ARCHIVO_CONFIG):

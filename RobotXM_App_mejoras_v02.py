@@ -154,6 +154,9 @@ class CustomDropdownWithTooltip:
 
 
     def show_dropdown(self, event=None):
+        # Si está deshabilitado, no hacer nada
+        if str(self.entry['state']) == 'disabled': return
+
         if self.dropdown:
             self.dropdown.destroy()
             self.dropdown = None
@@ -283,7 +286,9 @@ def generar_fechas_permitidas(fecha_ini, fecha_fin):
     delta = fecha_fin - fecha_ini
     for i in range(delta.days + 1):
         dia = fecha_ini + timedelta(days=i)
+        # Soportar DD (ej. 01) y MMDD (ej. 1101) para archivos diarios
         dias.append(dia.strftime("%d"))
+        dias.append(dia.strftime("%m%d"))
         meses.add(dia.strftime("%Y-%m"))
     return dias, meses
 
@@ -371,14 +376,47 @@ def bulk_insert_fast(conn, ruta_csv, tabla, meta_cols, chunksize=50000):
             reader = csv.DictReader(f, delimiter=';', skipinitialspace=True)
             if not reader.fieldnames: return 0
             
-            # Normalizar columnas
-            cols_csv = [safe_identifier(c.strip().replace(' ', '_').lower()) for c in reader.fieldnames]
+            # Normalizar columnas: quitar paréntesis y caracteres extraños de los headers del CSV
+            def clean_col_name(c):
+                # 1. Lowercase y replace spaces
+                s = c.strip().replace(' ', '_').lower()
+                # 2. Quitar paréntesis u otros caracteres no seguros (mantener alfanum y _)
+                s = re.sub(r'[^a-z0-9_]', '', s)
+                return safe_identifier(s)
+
+            cols_csv = [clean_col_name(c) for c in reader.fieldnames]
             
             # Columnas totales = CSV + Meta
             all_cols = cols_csv + list(meta_cols.keys())
+            
+            # --- AUTO-CREATE TABLE IF NOT EXISTS ---
+            # Usamos comillas dobles para soportar nombres reservados (ej. "index", "group")
+            defs = [f'"{c}" TEXT' for c in all_cols]
+            create_sql = f'CREATE TABLE IF NOT EXISTS "{tabla}" ({", ".join(defs)})'
+            try:
+                conn.execute(create_sql)
+            except Exception as e:
+                log.error(f"Error creando tabla {tabla}: {e}")
+                raise e
+
+            # Verificar si hay columnas nuevas
+            try:
+                cursor = conn.cursor()
+                cursor.execute(f"PRAGMA table_info(\"{tabla}\")")
+                existing_cols = {row[1] for row in cursor.fetchall()}
+                for c in all_cols:
+                    if c not in existing_cols:
+                        try:
+                            conn.execute(f'ALTER TABLE "{tabla}" ADD COLUMN "{c}" TEXT')
+                            log.info(f"Columna nueva agregada a {tabla}: {c}")
+                        except: pass 
+            except: pass
+            # ----------------------------------------
+
+            cols_quoted = [f'"{c}"' for c in all_cols]
             placeholders = ",".join(["?"] * len(all_cols))
             
-            sql = f"INSERT INTO {tabla} ({','.join(all_cols)}) VALUES ({placeholders})"
+            sql = f'INSERT INTO "{tabla}" ({",".join(cols_quoted)}) VALUES ({placeholders})'
             
             batch = []
             
@@ -413,7 +451,7 @@ def bulk_insert_fast(conn, ruta_csv, tabla, meta_cols, chunksize=50000):
 
 def ensure_indexes(conn, tabla, cols):
     for col in cols:
-        try: conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{tabla}_{col} ON {tabla}({col})")
+        try: conn.execute(f'CREATE INDEX IF NOT EXISTS "idx_{tabla}_{col}" ON "{tabla}"("{col}")')
         except: pass
 
 def proceso_descarga(config, es_reintento=False):
@@ -703,11 +741,13 @@ def generar_reporte_logica(config):
                     print(f"   ⚠️ Tabla '{tabla_solicitada}' no encontrada.")
                     continue
                 nombre_real_bd = resultado[0]
-                query = f"SELECT * FROM {nombre_real_bd} WHERE 1=1"
+                # Quote table name
+                query = f'SELECT * FROM "{nombre_real_bd}" WHERE 1=1'
                 titulo_texto = f"ARCHIVO: {tabla_solicitada.upper()}"
 
                 if col_filtro_usuario and val_filtro_usuario:
-                    cursor.execute(f"PRAGMA table_info({nombre_real_bd})")
+                    # Quote table name in PRAGMA
+                    cursor.execute(f'PRAGMA table_info("{nombre_real_bd}")')
                     columnas_bd = cursor.fetchall()
                     nombre_columna_real = None
                     for col_info in columnas_bd:
@@ -715,12 +755,13 @@ def generar_reporte_logica(config):
                             nombre_columna_real = col_info[1]
                             break
                     if nombre_columna_real:
-                        query += f" AND CAST({nombre_columna_real} AS TEXT) = '{val_filtro_usuario}'"
+                        # Quote column name
+                        query += f" AND CAST(\"{nombre_columna_real}\" AS TEXT) = '{val_filtro_usuario}'"
                         titulo_texto += f" ({val_filtro_usuario})"
                     else: print(f"   ⚠️ Campo '{col_filtro_usuario}' no existe.")
 
                 if ver_filtro_usuario and ver_filtro_usuario != "Última":
-                    query += f" AND version_dato = '{ver_filtro_usuario}'"
+                    query += f" AND \"version_dato\" = '{ver_filtro_usuario}'"
                     titulo_texto += f" [Ver: {ver_filtro_usuario}]"
                     print(f"   🔹 Procesando: {nombre_real_bd} (Filtro Ver: {ver_filtro_usuario})")
                 else: 
@@ -939,7 +980,7 @@ class ModuloVisualizador:
 
     def al_seleccionar_tabla(self, event):
         tabla = self.var_tabla.get()
-        if not tabla: return
+        if not tabla or tabla == "Seleccione Archivo...": return
         
         # --- RESET UI ---
         self.var_agregacion.set("Promedio")
@@ -1091,17 +1132,17 @@ class ModuloVisualizador:
         nombre_color = self.var_color_grafico.get()
         color_hex = COLORES_GRAFICO.get(nombre_color, "#27ae60")
 
-        if not tabla: return
+        if not tabla or tabla == "Seleccione Archivo...": return
 
         try:
-            conn = self.conectar(); query = f"SELECT * FROM {tabla} WHERE 1=1"
-            if campo1 and valor1: query += f" AND CAST({campo1} AS TEXT) = '{valor1}'"
-            if campo2 and valor2: query += f" AND CAST({campo2} AS TEXT) = '{valor2}'"
+            conn = self.conectar(); query = f'SELECT * FROM "{tabla}" WHERE 1=1'
+            if campo1 and valor1: query += f' AND CAST("{campo1}" AS TEXT) = \'{valor1}\''
+            if campo2 and valor2: query += f' AND CAST("{campo2}" AS TEXT) = \'{valor2}\''
             
             # Lógica Versión: Si es "Última" o "N/A", NO filtramos en SQL (traemos todo)
             # Si es una versión específica, sí filtramos.
             if version and version not in ["N/A", "Última"]: 
-                query += f" AND version_dato = '{version}'"
+                query += f" AND \"version_dato\" = '{version}'"
             
             print(f"Graficador SQL: {query}")
             df = pd.read_sql_query(query, conn); conn.close()
