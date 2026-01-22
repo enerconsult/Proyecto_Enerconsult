@@ -1,0 +1,180 @@
+{
+    "usuario": "ISAMDNT\\1140834150",
+    "password": "M3rcad0_De_3n3rgia+",
+    "ruta_local": "C:/Users/USUARIO/OneDrive/Documents/Prueba Proyecto Enerconsult",
+    "fecha_ini": "2025-12-01",
+    "fecha_fin": "2025-12-25",
+    "viz_fecha_ini": "2025-09-01",
+    "viz_fecha_fin": "2025-11-30",
+    "ruta_db_viz": "C:\\Users\\USUARIO\\OneDrive\\Documents\\Prueba Proyecto Enerconsult\\BaseDatosXM.db",
+    "archivos_descarga": [
+        {
+            "nombre_base": "arrpas",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "aenc",
+            "ruta_remota": "/INFORMACION_XM/USUARIOSK/COGG/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "trsd",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "grip",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "afac",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "oefsbmd",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "gliq",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "tgrl",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "tdia_sis",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "PEI",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "PTB",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "delsb",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "pme140",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "tserv",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "pep",
+            "ruta_remota": "/INFORMACION_XM/PUBLICOK/SIC/COMERCIA/"
+        },
+        {
+            "nombre_base": "aenc",
+            "ruta_remota": "/INFORMACION_XM/USUARIOSK/COGG/SIC/COMERCIA/"
+        }
+    ],
+    "filtros_reporte": [
+        {
+            "tabla": "aenc",
+            "campo": "",
+            "valor": "",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "arrpas",
+            "campo": "submercado",
+            "valor": "3JNR",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "delsb",
+            "campo": "submercado",
+            "valor": "3JNR",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "gliq",
+            "campo": "agente",
+            "valor": "COGG",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "grip",
+            "campo": "planta",
+            "valor": "3JNR",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "PEI",
+            "campo": "",
+            "valor": "",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "pep",
+            "campo": "agente",
+            "valor": "SISTEMA",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "pme140",
+            "campo": "",
+            "valor": "",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "PTB",
+            "campo": "",
+            "valor": "",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "tdia_sis",
+            "campo": "",
+            "valor": "",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "tgrl",
+            "campo": "agente",
+            "valor": "COGG",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "tgrl",
+            "campo": "agente",
+            "valor": "COGC",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "trsd",
+            "campo": "",
+            "valor": "",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "tserv",
+            "campo": "agente",
+            "valor": "COGG",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "tserv",
+            "campo": "agente",
+            "valor": "COGC",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "afac",
+            "campo": "agente",
+            "valor": "COGC",
+            "version": "\u00daltima"
+        },
+        {
+            "tabla": "afac",
+            "campo": "agente",
+            "valor": "COGG",
+            "version": "\u00daltima"
+        }
+    ]
+}

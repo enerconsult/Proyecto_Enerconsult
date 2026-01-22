@@ -12,3 +12,14 @@ __pycache__/
 # Logs y configs locales con secretos
 config_app.json
 *.log
+
+# Carpetas temporales de sincronización
+.tmp.driveupload/
+
+# Entornos virtuales y paquetes
+conda/
+.conda/
+env/
+venv/
+.venv/
+Node_modules/

@@ -111,17 +111,23 @@ class PrintRedirector:
         self.text_widget = text_widget
 
     def write(self, str_val):
+        msg = str(str_val)
+        def _append():
+            try:
+                self.text_widget.configure(state='normal')
+                self.text_widget.insert(tk.END, msg)
+                self.text_widget.see(tk.END)
+                self.text_widget.configure(state='disabled')
+            except tk.TclError:
+                pass # Widget destroyed
+            except Exception:
+                pass # Ignorar otros errores
+        
+        # Schedule update on main thread to avoid freezing
         try:
-            str_val = str(str_val) # Enforce string
-            self.text_widget.configure(state='normal')
-            self.text_widget.insert(tk.END, str_val)
-            self.text_widget.see(tk.END)
-            self.text_widget.configure(state='disabled')
-            self.text_widget.update_idletasks()
-        except tk.TclError:
-            pass # Widget destroyed
-        except Exception:
-            pass # Ignorar otros errores de UI logging
+            self.text_widget.after(0, _append)
+        except:
+            pass
 
     def flush(self): pass
 
@@ -149,7 +155,7 @@ class CustomDropdownWithTooltip:
         self.tooltip_threshold = tooltip_threshold
         self.dropdown_height = dropdown_height
 
-        self.entry = ttk.Entry(master, width=width, textvariable=self.textvariable)
+        self.entry = ttk.Entry(master, width=width, textvariable=self.textvariable, style="Compact.TEntry")
         self.entry.bind("<Button-1>", self.show_dropdown)
         self.entry.bind("<KeyRelease>", self.filter_items)
         self.entry.bind("<Down>", self.focus_listbox)
@@ -229,7 +235,27 @@ class CustomDropdownWithTooltip:
         self.listbox.bind("<Leave>", self.hide_tooltip)
         self.listbox.bind("<ButtonRelease-1>", self.select_item)
         self.listbox.bind("<Escape>", lambda e: self.close_dropdown())
-        self.dropdown.bind("<FocusOut>", lambda e: self.close_dropdown())
+        self.dropdown.bind("<FocusOut>", self._on_focus_out)
+
+    def _on_focus_out(self, event):
+        # Evitar cerrar si el foco se mueve a un widget hijo (scrollbar, listbox)
+        # Checkeo con after para dar tiempo a que se actualice el foco
+        self.master.after(10, self._check_focus)
+
+    def _check_focus(self):
+        if not self.dropdown: return
+        try:
+            focused = self.master.focus_get()
+            # Si el widget con foco es hijo del dropdown, no cerramos
+            if focused and str(focused).startswith(str(self.dropdown)):
+                return
+            # Si el foco volvió al entry, tampoco (usuario sigue editando)
+            if focused == self.entry:
+                return
+            # Si no, cerrar
+            self.close_dropdown()
+        except:
+            self.close_dropdown()
 
     def on_motion(self, event):
         if not self.listbox:
@@ -419,8 +445,11 @@ def make_ftps_connection(usuario, password):
     context.set_ciphers('DEFAULT:@SECLEVEL=1')
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
-    ftps = ftplib.FTP_TLS(context=context)
+    
+    # FIX: Agregar timeout explícito desde el constructor
+    ftps = ftplib.FTP_TLS(context=context, timeout=FTP_CONNECT_TIMEOUT)
     try:
+        # log.info("   ...Conectando FTP...") # Demasiado ruido si son muchos archivos
         ftps.connect('xmftps.xm.com.co', 210, timeout=FTP_CONNECT_TIMEOUT)
         ftps.auth()
         ftps.prot_p()
@@ -442,27 +471,35 @@ def retrbinary_safe(ftps, cmd, callback, blocksize=8192):
             if attempts >= FTP_RETRIES: raise e
             time.sleep(RETRY_BACKOFF * attempts)
 
-def descargar_archivos_paralelo(config, lista_tareas, workers=4):
+def descargar_archivos_paralelo(config, lista_tareas, workers=4, stop_event=None):
     usuario = config['usuario']
     password = config['password']
     
     def worker(tarea):
+        if stop_event and stop_event.is_set(): return (tarea[1], "Detenido por usuario")
         ruta_remota, ruta_local = tarea
         conn = None
         temp_path = ruta_local + ".part"
+        filename = os.path.basename(ruta_local)
+        
         try:
+            # log.info(f"   [START] {filename}") 
             conn = make_ftps_connection(usuario, password)
+            
             with open(temp_path, 'wb') as f:
+                # log.info(f"   [DOWNLOADING] {filename}")
                 retrbinary_safe(conn, f"RETR {ruta_remota}", f.write)
             
             # Validación simple de atomicidad
             if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
                 os.replace(temp_path, ruta_local) # Atomic rename
+                log.info(f"   ✅ Descargado: {filename}")
                 return (ruta_local, None)
             else:
                 return (ruta_local, "Descarga vacía (0 bytes)")
                 
         except Exception as e:
+            log.error(f"   ❌ Error {filename}: {e}")
             if os.path.exists(temp_path):
                 try: os.remove(temp_path)
                 except: pass
@@ -474,8 +511,12 @@ def descargar_archivos_paralelo(config, lista_tareas, workers=4):
 
     resultados = []
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_url = {executor.submit(worker, t): t for t in lista_tareas}
-        for future in as_completed(future_to_url):
+        futures = []
+        for t in lista_tareas:
+            if stop_event and stop_event.is_set(): break
+            futures.append(executor.submit(worker, t))
+            
+        for future in as_completed(futures):
             resultados.append(future.result())
     return resultados
 
@@ -500,11 +541,13 @@ def bulk_insert_fast(conn, ruta_csv, tabla, meta_cols, chunksize=50000):
             
             # Normalizar columnas: quitar paréntesis y caracteres extraños de los headers del CSV
             def clean_col_name(c):
-                # 1. Match v12 logic: strip, lower, space->underscore
-                # Permite parentesis (ej: "fecha_(hora)") evitando duplicados.
-                s = c.strip().replace(' ', '_').lower()
-                # 2. Safety: Quitar comillas dobles para no romper la query SQL construida manualmente
-                return s.replace('"', '')
+                # 1. Lower, strip
+                s = c.strip().lower()
+                # 2. Reemplazar caracteres no alfanuméricos por underscore
+                # Esto unifica "vran_", "vran ($/kWh)", "vran_($)" -> "vran_..._kwh"
+                s = re.sub(r'[^a-z0-9]+', '_', s)
+                # 3. Quitar underscores (limpieza final)
+                return s.strip('_')
 
             cols_csv = [clean_col_name(c) for c in reader.fieldnames]
             
@@ -576,7 +619,7 @@ def ensure_indexes(conn, tabla, cols):
         try: conn.execute(f'CREATE INDEX IF NOT EXISTS "idx_{tabla}_{col}" ON "{tabla}"("{col}")')
         except: pass
 
-def proceso_descarga(config, es_reintento=False):
+def proceso_descarga(config, es_reintento=False, stop_event=None):
     if es_reintento: log.warning("--- 🔄 INICIANDO FASE DE RECUPERACIÓN (RE-DESCARGA) ---")
     else: log.info("--- INICIANDO FASE 1: DESCARGA DE ARCHIVOS (PARALELA) ---")
     
@@ -610,6 +653,10 @@ def proceso_descarga(config, es_reintento=False):
         mapa_archivos[r].append(item['nombre_base'])
 
     for anio_mes in sorted(list(meses_permitidos)):
+        if stop_event and stop_event.is_set():
+            log.warning("⚠️ Proceso detenido por usuario durante búsqueda FTP.")
+            return
+
         mes_actual_str = anio_mes.split("-")[1] 
         ruta_local_mes = os.path.join(ruta_local_base, anio_mes)
         if not os.path.exists(ruta_local_mes): os.makedirs(ruta_local_mes)
@@ -662,7 +709,9 @@ def proceso_descarga(config, es_reintento=False):
         return
 
     log.info(f"⬇️ Iniciando descarga de {total_archivos} archivos...")
-    resultados = descargar_archivos_paralelo(config, tareas_descarga, workers=DEFAULT_WORKERS)
+    if stop_event and stop_event.is_set(): return
+
+    resultados = descargar_archivos_paralelo(config, tareas_descarga, workers=DEFAULT_WORKERS, stop_event=stop_event)
     
     errores = [r for r in resultados if r[1] is not None]
     exitos = len(resultados) - len(errores)
@@ -701,18 +750,26 @@ def cargar_cache_archivos_existentes(cursor):
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
         for (tabla,) in cursor.fetchall():
             try:
-                cursor.execute(f"PRAGMA table_info({tabla})")
+                # Usar comillas en nombre de tabla para manejar caracteres especiales
+                cursor.execute(f"PRAGMA table_info(\"{tabla}\")")
                 cols = [info[1] for info in cursor.fetchall()]
+                
                 if 'origen_archivo' in cols:
-                    cursor.execute(f"SELECT DISTINCT origen_archivo FROM {tabla}")
-                    for (archivo,) in cursor.fetchall():
-                        if archivo: cache.add(archivo)
+                    if 'anio' in cols:
+                        cursor.execute(f"SELECT DISTINCT origen_archivo, anio FROM \"{tabla}\"")
+                        for archivo, anio in cursor.fetchall():
+                            if archivo: cache.add((str(archivo), str(anio)))
+                    else:
+                        # Compatibilidad con tablas antiguas sin columna anio
+                        cursor.execute(f"SELECT DISTINCT origen_archivo FROM \"{tabla}\"")
+                        for (archivo,) in cursor.fetchall():
+                            if archivo: cache.add((str(archivo), None))
             except: pass
     except: pass
     log.info(f"🧠 Memoria lista: {len(cache)} archivos.")
     return cache
 
-def proceso_base_datos(config, es_reintento=False):
+def proceso_base_datos(config, es_reintento=False, stop_event=None):
     if es_reintento: log.warning("--- 🔄 INICIANDO FASE DE PROCESAMIENTO (INTENTO #2) ---")
     else: log.info("--- INICIANDO FASE 2: ACTUALIZACIÓN DE BASE DE DATOS (OPTIMIZADA) ---")
     ruta_descargas = config['ruta_local']
@@ -738,10 +795,20 @@ def proceso_base_datos(config, es_reintento=False):
     tablas_tocadas = set()
 
     for ruta_completa in archivos:
+        if stop_event and stop_event.is_set():
+            log.warning("⚠️ Proceso detenido por usuario durante actualización BD.")
+            conn.close()
+            return False
+
         nombre_archivo = os.path.basename(ruta_completa)
-        if nombre_archivo in archivos_procesados_cache: continue
+        
+        # Extraemos info primero para tener el año
         nombre_tabla, fecha_identificador, version = extraer_info_nombre(nombre_archivo)
         anio_carpeta = obtener_anio_de_carpeta(ruta_completa)
+
+        # Validación corregida: Chequear (nombre + año) para permitir mismos archivos en años distintos
+        # Si en caché tenemos (nombre, None) de versión vieja, no coincidirá con (nombre, '2026') -> Se procesará (OK)
+        if (nombre_archivo, anio_carpeta) in archivos_procesados_cache: continue
         es_valido = False
         if nombre_tabla in ARCHIVOS_MENSUALES:
             if f"{anio_carpeta}-{fecha_identificador}" in meses_permitidos: es_valido = True
@@ -808,18 +875,27 @@ def proceso_base_datos(config, es_reintento=False):
 def calcular_peso_version(extension):
     if not isinstance(extension, str): return 0
     ext = extension.lower().strip().replace('.', '')
-    if ext == 'tx1': return 1
-    if ext == 'tx2': return 2
-    if ext == 'txr': return 3
-    if ext == 'txf': return 10
-    if ext == 'txa': return 10 
+    
+    # Escala: txN = N * 100
+    # tx1 = 100, tx2 = 200
+    # txR = 250 (Entre tx2 y tx3)
+    # txF = 290 (Entre txR y tx3)
+    # tx3 = 300
+    
+    if ext == 'tx1': return 100
+    if ext == 'tx2': return 200
+    if ext == 'txr': return 250
+    if ext == 'txf': return 290
+    if ext == 'txa': return 290 # Asumimos igual que F
+    
     match = re.search(r'tx(\d+)', ext)
     if match:
         num = int(match.group(1))
-        if num > 2: return 10 + num 
+        return num * 100
+        
     return 0 
 
-def generar_reporte_logica(config):
+def generar_reporte_logica(config, stop_event=None):
     log.info("🚀 INICIANDO GENERADOR HORIZONTAL XM")
     ruta_local = config['ruta_local']
     ruta_db_completa = os.path.join(ruta_local, NOMBRE_DB_FILE)
@@ -852,6 +928,10 @@ def generar_reporte_logica(config):
             columna_actual = 0  
             tablas_escritas = 0
             for tarea in tareas_a_procesar:
+                if stop_event and stop_event.is_set():
+                    log.warning("⚠️ Generación de reporte detenida por usuario.")
+                    break
+
                 tabla_solicitada = tarea['tabla_solicitada']
                 col_filtro_usuario = tarea['filtro_campo']
                 val_filtro_usuario = tarea['filtro_valor']
@@ -928,6 +1008,7 @@ def generar_reporte_logica(config):
                     
                     cols_borrar = ['peso_version', 'max_peso_dia', 'origen_archivo', 'anio', 'mes_dia', 'fecha_carga']
                     df_final = df_final.drop(columns=[c for c in cols_borrar if c in df_final.columns], errors='ignore')
+                    df_final = df_final.drop_duplicates()
                     
                     pd.DataFrame({titulo_texto: []}).to_excel(writer, sheet_name="Datos", startrow=0, startcol=columna_actual, index=False)
                     df_final.to_excel(writer, sheet_name="Datos", startrow=1, startcol=columna_actual, index=False)
@@ -1059,8 +1140,8 @@ class ModuloVisualizador:
         self.ent_fecha_ini.bind("<FocusOut>", self.actualizar_versiones)
         self.ent_fecha_fin.bind("<FocusOut>", self.actualizar_versiones) 
 
-        ttk.Button(col3, text="📊 GRAFICAR", command=self.generar_grafico, style="Primary.TButton").grid(row=3, column=0, columnspan=2, pady=8, sticky="ew", padx=10)  # Reducido de pady=15 a pady=8
-        ttk.Button(col3, text="📥 EXCEL", command=self.exportar_datos_excel, style="Success.TButton").grid(row=4, column=0, columnspan=2, pady=3, sticky="ew", padx=10)  # Reducido de pady=5 a pady=3
+        ttk.Button(col3, text="📊 GRAFICAR", command=self.generar_grafico, style="Primary.TButton").grid(row=3, column=0, pady=8, sticky="ew", padx=2)
+        ttk.Button(col3, text="📥 EXCEL", command=self.exportar_datos_excel, style="Success.TButton").grid(row=3, column=1, pady=8, sticky="ew", padx=2)
 
         # PANEL ESTADÍSTICAS
         self.frame_stats = ttk.Frame(self.frame_main)
@@ -1078,7 +1159,7 @@ class ModuloVisualizador:
         # Reservar altura fija moderada para que ni título ni gráfico se recorten
         self.frame_plot.config(height=400)
         # Permitimos que el contenido se ajuste dentro del área reservada
-        self.frame_plot.pack_propagate(True)
+        self.frame_plot.pack_propagate(False) # FIX: False para respetar los 400px de altura
         self.frame_plot.pack(fill="both", expand=True, padx=10, pady=5)
         
         if os.path.exists(self.ruta_db): self.cargar_tablas()
@@ -1439,8 +1520,8 @@ class ModuloVisualizador:
         
         # --- ESTILO LIMPIO Y MODERNO ---
         fig = Figure(figsize=(8, 4.1), dpi=100, facecolor='#ffffff')
-        # Ajuste de márgenes para evitar recorte de título sin empujar el gráfico hacia arriba
-        fig.subplots_adjust(top=0.88, bottom=0.14, left=0.10, right=0.95)
+        # Ajuste de márgenes para evitar recorte de título y dar espacio a fechas rotadas
+        # fig.subplots_adjust(top=0.90, bottom=0.22, left=0.10, right=0.95) # ELIMINADO: Usamos tight_layout
         
         ax = fig.add_subplot(111)
         ax.set_facecolor('#ffffff')
@@ -1475,6 +1556,14 @@ class ModuloVisualizador:
             ax.scatter(serie.index, serie.values, color=color, s=40, alpha=0.8, zorder=3)
         
         line_ghost, = ax.plot(serie.index, serie.values, color=color, alpha=0.0) 
+
+        # --- FIX: Línea vertical guía del cursor ---
+        # Inicialmente oculta, se mueve con el mouse
+        try: init_x = serie.index[0]
+        except: init_x = 0
+        cursor_line = ax.axvline(x=init_x, color='#7f8c8d', linestyle='--', linewidth=1, alpha=0.6, zorder=0)
+        cursor_line.set_visible(False)
+        # ------------------------------------------- 
 
         # FUENTES Y EJES
         font_title = {'fontname': 'Segoe UI', 'fontsize': 12, 'weight': 'bold', 'color': '#2c3e50'}
@@ -1518,13 +1607,41 @@ class ModuloVisualizador:
 
         def hover(event):
             vis = annot.get_visible()
+            vis_line = cursor_line.get_visible()
+            
             if event.inaxes == ax:
+                # Actualizar línea vertical
+                cursor_line.set_xdata([event.xdata, event.xdata])
+                if not vis_line: cursor_line.set_visible(True)
+                
+                # Actualizar tooltip si toca un punto
                 cont, ind = line_ghost.contains(event)
-                if cont: update_annot(ind); annot.set_visible(True); fig.canvas.draw_idle()
+                if cont: 
+                    update_annot(ind)
+                    annot.set_visible(True)
+                    fig.canvas.draw_idle()
                 else:
-                    if vis: annot.set_visible(False); fig.canvas.draw_idle()
+                    # Si solo movemos la línea pero no el tooltip, redibujar solo si cambió estado
+                    if vis: 
+                        annot.set_visible(False)
+                        fig.canvas.draw_idle()
+                    else:
+                        # Solo redibujar para mover la linea
+                        fig.canvas.draw_idle()
+            else:
+                # Ocultar todo si salimos del gráfico
+                if vis_line or vis:
+                    cursor_line.set_visible(False)
+                    annot.set_visible(False)
+                    fig.canvas.draw_idle()
 
         fig.canvas.mpl_connect("motion_notify_event", hover)
+        
+        # --- FIX: AJUSTE AUTOMÁTICO DE MÁRGENES ---
+        # rect=[left, bottom, right, top] -> Reserva espacio arriba para título
+        try: fig.tight_layout(rect=[0, 0.05, 1, 0.88], pad=2.0)
+        except: pass
+        
         canvas = FigureCanvasTkAgg(fig, master=self.frame_plot)
         canvas.draw()
         
@@ -1545,9 +1662,26 @@ class AplicacionXM:
     def __init__(self, root):
         self.root = root
         self.root.title("Suite XM Inteligente - Enerconsult")
-        self.root.geometry("1100x900") 
+        # -- AJUSTE AUTOMÁTICO DE PANTALLA --
+        # Obtener dimensiones de la pantalla actual
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        
+        # Calcular geometría para modo "restaurado" (aprox 85% de la pantalla)
+        w_app = int(screen_width * 0.85)
+        h_app = int(screen_height * 0.85)
+        x_pos = (screen_width - w_app) // 2
+        y_pos = (screen_height - h_app) // 2
+        
+        # Establecer geometría centrada y maximizar por defecto
+        self.root.geometry(f"{w_app}x{h_app}+{x_pos}+{y_pos}")
+        try:
+            self.root.state('zoomed') # Maximizar en Windows
+        except Exception:
+            self.root.attributes('-zoomed', True) # Intento para Linux/Otros 
         
         self.config = self.cargar_config()
+        self.stop_event = threading.Event()
 
         self.configurar_estilos_modernos() # NUEVO TEMA
 
@@ -1596,7 +1730,7 @@ class AplicacionXM:
         # Altura fija para asegurar que siempre sea visible
         self.txt_console = scrolledtext.ScrolledText(
             console_container,
-            height=8,
+            height=6,
             state='disabled',
             bg='#0f172a',  # Más oscuro
             fg='#22c55e',  # Verde más suave
@@ -1627,6 +1761,20 @@ class AplicacionXM:
         
         # Empaquetar el tab_control DESPUÉS del monitor para que respete su espacio
         tab_control.pack(expand=True, fill="both", padx=10, pady=5)
+
+        # --- LOGICA DINÁMICA: REDUCIR CONSOLA EN VISUALIZADOR ---
+        def on_tab_change(event):
+            try:
+                # Identificar pestaña por texto
+                current_tab = tab_control.select()
+                tab_text = tab_control.tab(current_tab, "text")
+                if "Visualizador" in tab_text:
+                    self.txt_console.configure(height=4)
+                else:
+                    self.txt_console.configure(height=6)
+            except Exception: pass
+            
+        tab_control.bind("<<NotebookTabChanged>>", on_tab_change)
 
         self.crear_tab_general()
         self.crear_tab_archivos()
@@ -1880,6 +2028,21 @@ class AplicacionXM:
                 ("focus", c_azul_claro)  # Resplandor suave al enfocar
             ]
         )
+
+        # --- ESTILO COMPACTO PARA FILTROS (Solución altura) ---
+        style.configure("Compact.TEntry", 
+            padding=[5, 2],  # Padding reducido para igualar altura de Combobox
+            relief="flat",
+            borderwidth=1,
+            bordercolor=c_borde_claro,
+            fieldbackground=c_fondo_secundario
+        )
+        style.map("Compact.TEntry", 
+            bordercolor=[
+                ("focus", c_azul_primario),
+                ("!focus", c_borde_claro)
+            ]
+        )
         
         # Estilo para Entry con aspecto más moderno (simula bordes redondeados visualmente)
         style.configure("Modern.TEntry",
@@ -2049,7 +2212,7 @@ class AplicacionXM:
         # SECCIÓN 2: BOTONES DE ACCIÓN
         # =========================================================
         row_actions = tk.Frame(main_container, bg="#f8fafc")
-        row_actions.pack(pady=(0, 10))
+        row_actions.pack(pady=(0, 2)) # Reducido de (0, 10) a (0, 2)
         
         def create_action_btn(parent, text, icon, color, command):
             style = "Primary.TButton"
@@ -2068,11 +2231,14 @@ class AplicacionXM:
         self.btn_reporte = create_action_btn(row_actions, "GENERAR REPORTE", "📊", "blue", self.run_reporte)
         self.btn_reporte.grid(row=0, column=2, padx=10)
 
+        self.btn_reset = create_action_btn(row_actions, "RESET", "⏹️", "red", self.reset_process)
+        self.btn_reset.grid(row=0, column=3, padx=10)
+
         # =========================================================
         # SECCIÓN 3: DASHBOARD
         # =========================================================
         self.frame_dashboard = tk.Frame(main_container, bg="#f8fafc")
-        self.frame_dashboard.pack(fill="both", expand=True)
+        self.frame_dashboard.pack(fill="both", expand=True, pady=0)
         self.actualizar_dashboard()
 
     def crear_tab_archivos(self):
@@ -2120,11 +2286,12 @@ class AplicacionXM:
         self.tree_files.column("ruta", width=400, stretch=True) 
         self.tree_files.column("acciones", width=80, anchor="center")
         
-        self.tree_files.pack(fill="both", expand=True)
-
+        # Scrollbar layout fix: Pack scrollbar first to right, then treeview to remaining space
         scrollbar = ttk.Scrollbar(c2_content, orient="vertical", command=self.tree_files.yview)
         scrollbar.pack(side="right", fill="y")
+        
         self.tree_files.configure(yscrollcommand=scrollbar.set)
+        self.tree_files.pack(side="left", fill="both", expand=True)
         
         # Configurar tags para filas alternadas
         self.tree_files.tag_configure("even", background="#ffffff")
@@ -2197,7 +2364,7 @@ class AplicacionXM:
 
         # Col 3: Versión (Combobox)
         ttk.Label(c1_content, text="Versión", background="#ffffff").grid(row=0, column=3, sticky="w", pady=(0, 5), padx=5)
-        self.cb_r_ver = ttk.Combobox(c1_content, values=["Última", "tx1", "tx2", "tx3", "txR"], state="readonly", width=10) # Fixed width
+        self.cb_r_ver = ttk.Combobox(c1_content, values=["Última", "tx1", "tx2", "tx3", "txR", "txF"], state="readonly", width=10) # Fixed width
         self.cb_r_ver.set("Última")
         self.cb_r_ver.grid(row=1, column=3, sticky="ew", padx=5, ipady=3)
         self.cb_r_ver.bind("<<ComboboxSelected>>", self.actualizar_todas_versiones_filtro)
@@ -2240,11 +2407,12 @@ class AplicacionXM:
         self.tree_filtros.column("version", width=100, anchor="center")
         self.tree_filtros.column("acciones", width=80, anchor="center")
         
-        self.tree_filtros.pack(fill="both", expand=True)
-        
+        # Scrollbar layout fix
         scrollbar = ttk.Scrollbar(c2_content, orient="vertical", command=self.tree_filtros.yview)
         scrollbar.pack(side="right", fill="y")
+        
         self.tree_filtros.configure(yscrollcommand=scrollbar.set)
+        self.tree_filtros.pack(side="left", fill="both", expand=True)
         
         # Configurar tags para filas alternadas
         self.tree_filtros.tag_configure("even", background="#ffffff")
@@ -2394,13 +2562,13 @@ class AplicacionXM:
         
         # Frame interno con padding
         inner = tk.Frame(card, bg="#ffffff")
-        inner.pack(fill="both", expand=True, padx=20, pady=20)
+        inner.pack(fill="both", expand=True, padx=20, pady=10) # Reducido pady=20 a 10
         
         # Icono grande
         icon_label = tk.Label(
             inner, 
             text=icon, 
-            font=("Segoe UI", 32),
+            font=("Segoe UI", 24), # Reducido de 32 a 24
             bg="#ffffff",
             fg=color
         )
@@ -2414,7 +2582,7 @@ class AplicacionXM:
         value_label = tk.Label(
             text_frame,
             text=str(value),
-            font=("Segoe UI", 24, "bold"),
+            font=("Segoe UI", 18, "bold"), # Reducido de 24 a 18
             bg="#ffffff",
             fg="#1e293b"
         )
@@ -2424,7 +2592,7 @@ class AplicacionXM:
         label_label = tk.Label(
             text_frame,
             text=label,
-            font=("Segoe UI", 10),
+            font=("Segoe UI", 9), # Reducido de 10 a 9
             bg="#ffffff",
             fg="#64748b"
         )
@@ -2453,7 +2621,7 @@ class AplicacionXM:
         
         # Contenedor con grid de 3 columnas
         grid_container = tk.Frame(self.frame_dashboard, bg="#f8fafc")
-        grid_container.pack(fill="both", expand=True, padx=20, pady=20)
+        grid_container.pack(fill="both", expand=True, padx=20, pady=5) # Reducido pady de 20 a 5
         
         # Configurar grid de 3 columnas
         for i in range(3):
@@ -2503,21 +2671,37 @@ class AplicacionXM:
             except: pass
         return {}
 
+    def reset_process(self):
+        if not self.stop_event.is_set():
+            self.stop_event.set()
+            log.warning("🛑 SOLICITUD DE PARADA RECIBIDA. Deteniendo procesos en curso...")
+        else:
+             log.info("ℹ️ Ya se está deteniendo el proceso...")
+
     def run_descarga(self):
         if not self.validar_config(): return
+        self.stop_event.clear()
         self.toggle_controls('disabled')
         threading.Thread(target=self._exec_descarga, args=(self.get_config(),)).start()
     
     def _exec_descarga(self, cfg):
         try:
-            proceso_descarga(cfg)
-            necesita_fix = proceso_base_datos(cfg)
+            proceso_descarga(cfg, stop_event=self.stop_event)
+            if self.stop_event.is_set(): return
+            
+            necesita_fix = proceso_base_datos(cfg, stop_event=self.stop_event)
+            if self.stop_event.is_set(): return
+
             if necesita_fix:
                 log.warning("⚠️ DETECTADOS ARCHIVOS CORRUPTOS. AUTORREPARANDO...")
                 time.sleep(1)
-                proceso_descarga(cfg, es_reintento=True)
-                proceso_base_datos(cfg, es_reintento=True)
-            log.info("🏁 PROCESO FINALIZADO.")
+                proceso_descarga(cfg, es_reintento=True, stop_event=self.stop_event)
+                proceso_base_datos(cfg, es_reintento=True, stop_event=self.stop_event)
+            
+            if not self.stop_event.is_set():
+                log.info("🏁 PROCESO FINALIZADO.")
+            else:
+                log.warning("🏁 PROCESO DETENIDO.")
         except Exception as e:
             log.error(f"❌ Error crítico en proceso: {e}")
         finally:
@@ -2525,12 +2709,13 @@ class AplicacionXM:
 
     def run_reporte(self):
         if not self.validar_config(): return
+        self.stop_event.clear()
         self.toggle_controls('disabled')
         threading.Thread(target=self._exec_reporte, args=(self.get_config(),)).start()
 
     def _exec_reporte(self, cfg):
         try:
-            generar_reporte_logica(cfg)
+            generar_reporte_logica(cfg, stop_event=self.stop_event)
         except Exception as e:
             log.error(f"❌ Error crítico generando reporte: {e}")
         finally:
