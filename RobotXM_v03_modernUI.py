@@ -294,6 +294,14 @@ class CalendarDialog(ttk.Toplevel):
         except: pass
         self.resizable(False, False)
         
+        # Configurar icono
+        try:
+            ruta_icono = os.path.join(os.path.dirname(os.path.abspath(__file__)), ICON_WINDOW_FILENAME)
+            if os.path.exists(ruta_icono):
+                img_icon = tk.PhotoImage(file=ruta_icono)
+                self.iconphoto(False, img_icon)
+        except: pass
+
         self.current_date = date.today()
         self.year = self.current_date.year
         self.month = self.current_date.month
@@ -301,11 +309,32 @@ class CalendarDialog(ttk.Toplevel):
         self.setup_ui()
         self.build_calendar()
         
-        # Centrar respecto al mouse o ventana
+        # Centrar respecto al mouse o ventana con limites funcionales
         try:
-            x = parent.winfo_pointerx() - 100
+            self.update_idletasks()
+            req_w = self.winfo_reqwidth()
+            req_h = self.winfo_reqheight()
+            
+            x = parent.winfo_pointerx()
             y = parent.winfo_pointery()
-            self.geometry(f"+{x}+{y}")
+            
+            screen_w = self.winfo_screenwidth()
+            screen_h = self.winfo_screenheight()
+            
+            # Ajuste de posición mouse
+            x += 10
+            y += 10
+            
+            # Verificar limites para que no se salga
+            if x + req_w > screen_w:
+                x = screen_w - req_w - 20
+            if y + req_h > screen_h:
+                y = screen_h - req_h - 40
+                
+            if x < 0: x = 0
+            if y < 0: y = 0
+            
+            self.geometry(f"+{int(x)}+{int(y)}")
         except:
             self.position_center()
 

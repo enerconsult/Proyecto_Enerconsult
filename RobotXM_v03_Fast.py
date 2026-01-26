@@ -67,6 +67,7 @@ NOMBRE_REPORTE_FILE = "Reporte_Horizontal_XM.xlsx"
 ARCHIVO_CONFIG = "config_app.json"
 ARCHIVOS_MENSUALES = ['PEI', 'PME140', 'tserv', 'afac']
 LOGO_FILENAME = "logo_empresa.png"
+ICON_WINDOW_FILENAME = "Enerconsult.png"
 
 # Colores para gráficos (Mantenemos mapeo para matplotlib)
 COLORES_GRAFICO = {
@@ -473,7 +474,8 @@ def descargar_archivos_paralelo(config, lista_tareas, workers=4, stop_event=None
     return resultados
 
 def sqlite_fast_connect(db_path):
-    conn = sqlite3.connect(db_path)
+    # isolation_level=None permite gestion manual de transacciones
+    conn = sqlite3.connect(db_path, isolation_level=None)
     try:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
@@ -708,76 +710,89 @@ def proceso_base_datos(config, es_reintento=False, stop_event=None):
     corruptos_eliminados = 0
     tablas_tocadas = set()
 
-    for ruta_completa in archivos:
-        if stop_event and stop_event.is_set():
-            log.warning("⚠️ Proceso detenido por usuario durante actualización BD.")
-            conn.close()
-            return False
-
-        nombre_archivo = os.path.basename(ruta_completa)
-        nombre_tabla, fecha_identificador, version = extraer_info_nombre(nombre_archivo)
-        anio_carpeta = obtener_anio_de_carpeta(ruta_completa)
-
-        if (nombre_archivo.lower(), anio_carpeta) in archivos_procesados_cache: continue
-        es_valido = False
-        carpeta_padre = os.path.basename(os.path.dirname(ruta_completa))
+    # --- OPTIMIZACIÓN: TRANSACCIÓN ÚNICA ---
+    try:
+        conn.execute("BEGIN TRANSACTION")
         
-        if nombre_tabla in ARCHIVOS_MENSUALES:
-            if f"{anio_carpeta}-{fecha_identificador}" in meses_permitidos: es_valido = True
-        else:
-            if fecha_identificador in dias_permitidos:
-                 if carpeta_padre in meses_permitidos:
-                     es_valido = True
-                 elif carpeta_padre == anio_carpeta and len(fecha_identificador) == 4:
-                     mes = fecha_identificador[:2]
-                     if f"{anio_carpeta}-{mes}" in meses_permitidos: es_valido = True
-                         
-        if not es_valido: continue
+        for ruta_completa in archivos:
+            if stop_event and stop_event.is_set():
+                log.warning("⚠️ Proceso detenido por usuario durante actualización BD.")
+                conn.rollback()
+                conn.close()
+                return False
 
-        archivo_corrupto = False
-        razon = ""
-        size_bytes = os.path.getsize(ruta_completa)
-        if size_bytes == 0: archivo_corrupto = True; razon = "0 bytes"
-        
-        if archivo_corrupto:
-            log.warning(f"🗑️ Corrupto ({razon}): {nombre_archivo} -> ELIMINADO")
-            try: os.remove(ruta_completa)
-            except: pass
-            corruptos_eliminados += 1
-            continue
+            nombre_archivo = os.path.basename(ruta_completa)
+            nombre_tabla, fecha_identificador, version = extraer_info_nombre(nombre_archivo)
+            anio_carpeta = obtener_anio_de_carpeta(ruta_completa)
+
+            if (nombre_archivo.lower(), anio_carpeta) in archivos_procesados_cache: continue
+            es_valido = False
+            carpeta_padre = os.path.basename(os.path.dirname(ruta_completa))
             
-        try:
-            meta = {
-                'origen_archivo': nombre_archivo,
-                'anio': anio_carpeta,
-                'mes_dia': fecha_identificador,
-                'version_dato': version,
-                'fecha_carga': str(pd.Timestamp.now())
-            }
-            rows = bulk_insert_fast(conn, ruta_completa, nombre_tabla, meta, chunksize=100000)
-            
-            if rows > 0:
-                archivos_procesados_cache.add((nombre_archivo, anio_carpeta))
-                tablas_tocadas.add(nombre_tabla)
-                log.info(f"💾 Guardado ({rows} filas): {nombre_archivo}")
+            if nombre_tabla in ARCHIVOS_MENSUALES:
+                if f"{anio_carpeta}-{fecha_identificador}" in meses_permitidos: es_valido = True
             else:
-                raise Exception("Archivo vacío o sin datos válidos")
-                
-        except Exception as e:
-            if "No columns to parse" in str(e) or "registros" in str(e).lower() or "vacío" in str(e).lower():
-                log.warning(f"🗑️ Archivo vacío detectado: {nombre_archivo}")
+                if fecha_identificador in dias_permitidos:
+                     if carpeta_padre in meses_permitidos:
+                         es_valido = True
+                     elif carpeta_padre == anio_carpeta and len(fecha_identificador) == 4:
+                         mes = fecha_identificador[:2]
+                         if f"{anio_carpeta}-{mes}" in meses_permitidos: es_valido = True
+                             
+            if not es_valido: continue
+
+            archivo_corrupto = False
+            razon = ""
+            try: size_bytes = os.path.getsize(ruta_completa)
+            except: size_bytes = 0
+            if size_bytes == 0: archivo_corrupto = True; razon = "0 bytes"
+            
+            if archivo_corrupto:
+                log.warning(f"🗑️ Corrupto ({razon}): {nombre_archivo} -> ELIMINADO")
                 try: os.remove(ruta_completa)
                 except: pass
                 corruptos_eliminados += 1
-            else:
-                log.error(f"⚠️ Error leyendo {nombre_archivo}: {e}")
+                continue
+                
+            try:
+                meta = {
+                    'origen_archivo': nombre_archivo,
+                    'anio': anio_carpeta,
+                    'mes_dia': fecha_identificador,
+                    'version_dato': version,
+                    'fecha_carga': str(pd.Timestamp.now())
+                }
+                rows = bulk_insert_fast(conn, ruta_completa, nombre_tabla, meta, chunksize=100000)
+                
+                if rows > 0:
+                    archivos_procesados_cache.add((nombre_archivo, anio_carpeta))
+                    tablas_tocadas.add(nombre_tabla)
+                    log.info(f"💾 Guardado ({rows} filas): {nombre_archivo}")
+                else:
+                    raise Exception("Archivo vacío o sin datos válidos")
+                    
+            except Exception as e:
+                if "No columns to parse" in str(e) or "registros" in str(e).lower() or "vacío" in str(e).lower():
+                    log.warning(f"🗑️ Archivo vacío detectado: {nombre_archivo}")
+                    try: os.remove(ruta_completa)
+                    except: pass
+                    corruptos_eliminados += 1
+                else:
+                    log.error(f"⚠️ Error leyendo {nombre_archivo}: {e}")
 
-    if tablas_tocadas:
-        log.info("🔨 Optimizando índices...")
-        for t in tablas_tocadas:
-            ensure_indexes(conn, t, ['anio', 'mes_dia', 'version_dato', 'origen_archivo'])
-            
-    conn.close()
+        if tablas_tocadas:
+            log.info("🔨 Optimizando índices...")
+            for t in tablas_tocadas:
+                ensure_indexes(conn, t, ['anio', 'mes_dia', 'version_dato', 'origen_archivo'])
+        
+        conn.commit()
+        
+    except Exception as e:
+        log.error(f"❌ Error crítico en transacción BD: {e}")
+        try: conn.rollback()
+        except: pass
+    finally:
+        conn.close()
     log.info(f"✅ FASE {'2' if not es_reintento else 'RECUPERACIÓN'} TERMINADA.")
     if corruptos_eliminados > 0: return True 
     return False
@@ -1480,6 +1495,14 @@ class AplicacionXM:
         w_app = int(screen_width * 0.85); h_app = int(screen_height * 0.85)
         x_pos = (screen_width - w_app) // 2; y_pos = (screen_height - h_app) // 2
         self.root.geometry(f"{w_app}x{h_app}+{x_pos}+{y_pos}")
+
+        # Configurar icono de ventana
+        try:
+            ruta_icono = os.path.join(os.path.dirname(os.path.abspath(__file__)), ICON_WINDOW_FILENAME)
+            if os.path.exists(ruta_icono):
+                img_icon = tk.PhotoImage(file=ruta_icono)
+                self.root.iconphoto(False, img_icon)
+        except Exception: pass
         
         self.config = self.cargar_config()
         self.stop_event = threading.Event()
