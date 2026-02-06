@@ -65,7 +65,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 NOMBRE_DB_FILE = "BaseDatosXM.db"
 NOMBRE_REPORTE_FILE = "Reporte_Horizontal_XM.xlsx"
 ARCHIVO_CONFIG = "config_app.json"
-ARCHIVOS_MENSUALES = ['PEI', 'PME140', 'tserv', 'afac']
+ARCHIVOS_MENSUALES = ['PEI', 'PME140', 'tserv', 'afac', 'preofe']
 LOGO_FILENAME = "logo_empresa.png"
 ICON_WINDOW_FILENAME = "Enerconsult.png"
 
@@ -109,7 +109,7 @@ log = setup_logging()
 DEFAULT_WORKERS = 3
 FTP_CONNECT_TIMEOUT = 30
 FTP_RETRIES = 3
-RETRY_BACKOFF = 2.0 
+RETRY_BACKOFF = 2.0
 
 # =============================================================================
 #  CLASE PARA REDIRIGIR LA CONSOLA
@@ -191,7 +191,7 @@ class CustomDropdownWithTooltip:
         scrollbar.pack(side="right", fill="y")
 
         chars_w = int(w_pixels / 7)
-        # Listbox nativo de tk (ttk no tiene), estilizado manualmente si es posible, 
+        # Listbox nativo de tk (ttk no tiene), estilizado manualmente si es posible,
         # pero mantenemos defaults para compatibilidad simple.
         self.listbox = tk.Listbox(frame_list, width=chars_w, height=8, yscrollcommand=scrollbar.set,
                                   exportselection=False, font=("Segoe UI", 10), borderwidth=0)
@@ -289,11 +289,11 @@ class CalendarDialog(ttk.Toplevel):
         self.callback = callback
         self.title("Seleccionar Fecha")
         self.grab_set()
-        
+
         try: self.attributes("-topmost", True)
         except: pass
         self.resizable(False, False)
-        
+
         # Configurar icono
         try:
             ruta_icono = os.path.join(os.path.dirname(os.path.abspath(__file__)), ICON_WINDOW_FILENAME)
@@ -305,36 +305,46 @@ class CalendarDialog(ttk.Toplevel):
         self.current_date = date.today()
         self.year = self.current_date.year
         self.month = self.current_date.month
-        
+
         self.setup_ui()
         self.build_calendar()
-        
+
         # Centrar respecto al mouse o ventana con limites funcionales
         try:
             self.update_idletasks()
             req_w = self.winfo_reqwidth()
             req_h = self.winfo_reqheight()
-            
+
             x = parent.winfo_pointerx()
             y = parent.winfo_pointery()
+
+            # Detectar escritorio virtual y ventana padre
+            v_root_x = self.winfo_vrootx()
+            v_root_y = self.winfo_vrooty()
+            v_root_w = self.winfo_vrootwidth()
+            v_root_h = self.winfo_vrootheight()
+
+            # Usar la ventana padre como referencia de límites seguros (mejor UX)
+            parent_right = parent.winfo_rootx() + parent.winfo_width()
             
-            screen_w = self.winfo_screenwidth()
-            screen_h = self.winfo_screenheight()
+            # Posición base: derecha del cursor
+            pos_x = x + 10
+            pos_y = y + 10
+
+            # Si se sale del borde derecho de la APP (o del virtual root), mostrar a la izquierda
+            if (pos_x + req_w > parent_right) or (pos_x + req_w > v_root_x + v_root_w):
+                pos_x = x - req_w - 10
             
-            # Ajuste de posición mouse
-            x += 10
-            y += 10
+            # Verificar borde inferior (app o virtual)
+            parent_bottom = parent.winfo_rooty() + parent.winfo_height()
+            if (pos_y + req_h > v_root_y + v_root_h): # Priority to screen bottom
+                pos_y = (v_root_y + v_root_h) - req_h - 40
             
-            # Verificar limites para que no se salga
-            if x + req_w > screen_w:
-                x = screen_w - req_w - 20
-            if y + req_h > screen_h:
-                y = screen_h - req_h - 40
-                
-            if x < 0: x = 0
-            if y < 0: y = 0
-            
-            self.geometry(f"+{int(x)}+{int(y)}")
+            # Última seguridad: no salir del borde izquierdo virtual
+            if pos_x < v_root_x: pos_x = v_root_x
+            if pos_y < v_root_y: pos_y = v_root_y
+
+            self.geometry(f"+{int(pos_x)}+{int(pos_y)}")
         except:
             self.position_center()
 
@@ -344,41 +354,41 @@ class CalendarDialog(ttk.Toplevel):
 
         header_frame = ttk.Frame(main_frame)
         header_frame.pack(fill="x", pady=(0, 10))
-        
+
         btn_prev = ttk.Button(header_frame, text="<", command=self.prev_month, bootstyle="outline")
         btn_prev.pack(side="left")
-        
+
         self.lbl_month_year = ttk.Label(header_frame, text="", font=("Segoe UI", 10, "bold"), anchor="center")
         self.lbl_month_year.pack(side="left", expand=True, fill="x")
-        
+
         btn_next = ttk.Button(header_frame, text=">", command=self.next_month, bootstyle="outline")
         btn_next.pack(side="right")
-        
+
         days_frame = ttk.Frame(main_frame)
         days_frame.pack()
         days_es = ["Lu", "Ma", "Mi", "Ju", "Vi", "Sá", "Do"]
         for i, d in enumerate(days_es):
             ttk.Label(days_frame, text=d, font=("Segoe UI", 8, "bold"), width=4, anchor="center").grid(row=0, column=i)
-            
+
         self.calendar_frame = ttk.Frame(main_frame)
         self.calendar_frame.pack(pady=(5, 0))
 
     def build_calendar(self):
         for widget in self.calendar_frame.winfo_children(): widget.destroy()
-        
+
         meses = ["", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
         self.lbl_month_year.config(text=f"{meses[self.month]} {self.year}")
-        
+
         cal = calendar.monthcalendar(self.year, self.month)
-        
+
         for r, week in enumerate(cal):
             for c, day in enumerate(week):
                 if day == 0: continue
-                
+
                 style_btn = "light"
                 if day == date.today().day and self.month == date.today().month and self.year == date.today().year:
                     style_btn = "primary" # Highlight today
-                
+
                 btn = ttk.Button(self.calendar_frame, text=str(day), width=3, bootstyle=style_btn,
                                 command=lambda d=day: self.select_date(d))
                 btn.grid(row=r, column=c, padx=1, pady=1)
@@ -435,7 +445,7 @@ def make_ftps_connection(usuario, password):
     context.set_ciphers('DEFAULT:@SECLEVEL=1')
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
-    
+
     ftps = ftplib.FTP_TLS(context=context, timeout=FTP_CONNECT_TIMEOUT)
     try:
         ftps.connect('xmftps.xm.com.co', 210, timeout=FTP_CONNECT_TIMEOUT)
@@ -446,7 +456,7 @@ def make_ftps_connection(usuario, password):
         raise Exception(f"Fallo conexión FTP: {e}")
     return ftps
 
-def retrbinary_safe(ftps, cmd, callback, blocksize=32768): 
+def retrbinary_safe(ftps, cmd, callback, blocksize=32768):
     attempts = 0
     while attempts < FTP_RETRIES:
         try:
@@ -460,26 +470,26 @@ def retrbinary_safe(ftps, cmd, callback, blocksize=32768):
 def descargar_archivos_paralelo(config, lista_tareas, workers=4, stop_event=None):
     usuario = config['usuario']
     password = config['password']
-    
+
     def worker(tarea):
         if stop_event and stop_event.is_set(): return (tarea[1], "Detenido por usuario")
         ruta_remota, ruta_local = tarea
         conn = None
         temp_path = ruta_local + ".part"
         filename = os.path.basename(ruta_local)
-        
+
         try:
             conn = make_ftps_connection(usuario, password)
             with open(temp_path, 'wb') as f:
                 retrbinary_safe(conn, f"RETR {ruta_remota}", f.write)
-            
+
             if os.path.exists(temp_path) and os.path.getsize(temp_path) > 0:
-                os.replace(temp_path, ruta_local) 
+                os.replace(temp_path, ruta_local)
                 log.info(f"   ✅ Descargado: {filename}")
                 return (ruta_local, None)
             else:
                 return (ruta_local, "Descarga vacía (0 bytes)")
-                
+
         except Exception as e:
             log.error(f"   ❌ Error {filename}: {e}")
             if os.path.exists(temp_path):
@@ -487,7 +497,7 @@ def descargar_archivos_paralelo(config, lista_tareas, workers=4, stop_event=None
                 except: pass
             return (ruta_local, str(e))
         finally:
-            if conn: 
+            if conn:
                 try: conn.quit()
                 except: pass
 
@@ -497,7 +507,7 @@ def descargar_archivos_paralelo(config, lista_tareas, workers=4, stop_event=None
         for t in lista_tareas:
             if stop_event and stop_event.is_set(): break
             futures.append(executor.submit(worker, t))
-            
+
         for future in as_completed(futures):
             resultados.append(future.result())
     return resultados
@@ -507,7 +517,7 @@ def sqlite_fast_connect(db_path):
     try:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute("PRAGMA cache_size = -64000") 
+        conn.execute("PRAGMA cache_size = -64000")
         conn.execute("PRAGMA temp_store = MEMORY")
     except: pass
     return conn
@@ -519,11 +529,11 @@ def bulk_insert_fast(conn, ruta_csv, tabla, meta_cols, chunksize=50000):
         if str(ruta_csv).lower().endswith('.txt'):
             custom_names = ['descripcion'] + [str(i) for i in range(1, 25)]
             df_iter = pd.read_csv(ruta_csv, sep=',', header=None, names=custom_names,
-                                  encoding='latin-1', chunksize=chunksize, dtype=str, 
+                                  encoding='latin-1', chunksize=chunksize, dtype=str,
                                   engine='c', skipinitialspace=True)
         else:
-            df_iter = pd.read_csv(ruta_csv, sep=';', encoding='latin-1', 
-                                  chunksize=chunksize, dtype=str, engine='c', 
+            df_iter = pd.read_csv(ruta_csv, sep=';', encoding='latin-1',
+                                  chunksize=chunksize, dtype=str, engine='c',
                                   skipinitialspace=True)
     except Exception as e:
         log.error(f"Error leyendo CSV {ruta_csv}: {e}")
@@ -531,23 +541,23 @@ def bulk_insert_fast(conn, ruta_csv, tabla, meta_cols, chunksize=50000):
 
     first_chunk = True
     INSERT_CHUNKSIZE = 500
-    
+
     for df_chunk in df_iter:
         df_chunk.columns = [
-            re.sub(r'[^a-z0-9]+', '_', c.strip().lower()).strip('_') 
+            re.sub(r'[^a-z0-9]+', '_', c.strip().lower()).strip('_')
             for c in df_chunk.columns
         ]
-        
+
         for k, v in meta_cols.items():
             df_chunk[k] = v
-            
+
         if first_chunk:
             try:
                 cursor = conn.cursor()
                 cursor.execute(f'PRAGMA table_info("{tabla}")')
                 existing_cols_info = cursor.fetchall()
                 existing_cols = {info[1] for info in existing_cols_info}
-                
+
                 if existing_cols:
                     for col in df_chunk.columns:
                         if col not in existing_cols:
@@ -558,7 +568,7 @@ def bulk_insert_fast(conn, ruta_csv, tabla, meta_cols, chunksize=50000):
             first_chunk = False
 
         try:
-            df_chunk.to_sql(tabla, conn, if_exists='append', index=False, 
+            df_chunk.to_sql(tabla, conn, if_exists='append', index=False,
                           chunksize=INSERT_CHUNKSIZE, method='multi')
             total_rows += len(df_chunk)
         except Exception as e:
@@ -575,11 +585,11 @@ def ensure_indexes(conn, tabla, cols):
 def proceso_descarga(config, es_reintento=False, stop_event=None):
     if es_reintento: log.warning("--- 🔄 INICIANDO FASE DE RECUPERACIÓN (RE-DESCARGA) ---")
     else: log.info("--- INICIANDO FASE 1: DESCARGA DE ARCHIVOS (PARALELA) ---")
-    
+
     usuario = config['usuario']
     password = config['password']
     ruta_local_base = config['ruta_local']
-    
+
     try:
         fecha_ini = datetime.strptime(config['fecha_ini'], "%Y-%m-%d")
         fecha_fin = datetime.strptime(config['fecha_fin'], "%Y-%m-%d")
@@ -587,19 +597,19 @@ def proceso_descarga(config, es_reintento=False, stop_event=None):
         log.error("❌ Error: Formato de fecha inválido. Use YYYY-MM-DD")
         return
 
-    lista_archivos = config['archivos_descarga'] 
+    lista_archivos = config['archivos_descarga']
     dias_permitidos, meses_permitidos = generar_fechas_permitidas(fecha_ini, fecha_fin)
 
     log.info("🔎 Buscando archivos en el servidor...")
-    tareas_descarga = [] 
-    
+    tareas_descarga = []
+
     try:
         ftps = make_ftps_connection(usuario, password)
     except Exception as e:
         log.error(f"❌ No se pudo conectar para listar: {e}")
         return
 
-    mapa_archivos = {} 
+    mapa_archivos = {}
     for item in lista_archivos:
         r = item['ruta_remota']
         if r not in mapa_archivos: mapa_archivos[r] = []
@@ -610,7 +620,7 @@ def proceso_descarga(config, es_reintento=False, stop_event=None):
             log.warning("⚠️ Proceso detenido por usuario durante búsqueda FTP.")
             return
 
-        mes_actual_str = anio_mes.split("-")[1] 
+        mes_actual_str = anio_mes.split("-")[1]
         ruta_local_mes = os.path.join(ruta_local_base, anio_mes)
         if not os.path.exists(ruta_local_mes): os.makedirs(ruta_local_mes)
 
@@ -620,10 +630,28 @@ def proceso_descarga(config, es_reintento=False, stop_event=None):
             elif ruta_remota_base.endswith(anio_mes): ruta_final = ruta_remota_base
             else: ruta_final = f"{ruta_remota_base}/{anio_mes}"
 
-            try:
-                ftps.cwd(ruta_final)
-                archivos_en_servidor = ftps.nlst()
-            except: continue
+            # Lógica de reintento robusta para listar archivos
+            exito_listar = False
+            for intento in range(3):
+                try:
+                    ftps.cwd(ruta_final)
+                    archivos_en_servidor = ftps.nlst()
+                    exito_listar = True
+                    break
+                except Exception as e:
+                    # Si falla, intentamos reconectar
+                    log.warning(f"⚠️ Conexión perdida en {ruta_final} (Intento {intento+1}/3). Reconectando...")
+                    try:
+                        try: ftps.quit() 
+                        except: pass
+                        time.sleep(2) # Espera prudencial
+                        ftps = make_ftps_connection(usuario, password)
+                    except Exception as e2:
+                        log.error(f"   ❌ Fallo al reconectar: {e2}")
+            
+            if not exito_listar:
+                log.error(f"❌ Omitiendo {ruta_final} tras fallos reiterados.")
+                continue
 
             for nombre_base in nombres_base:
                 nombre_base = str(nombre_base).strip()
@@ -645,17 +673,17 @@ def proceso_descarga(config, es_reintento=False, stop_event=None):
                         for dia in dias_permitidos:
                             if dia in nombre_archivo:
                                 coincidencias.append(f"{ruta_final}/{f}")
-                                break 
-                
+                                break
+
                 for archivo_full in coincidencias:
                     nombre_limpio = os.path.basename(archivo_full)
                     ruta_destino = os.path.join(ruta_local_mes, nombre_limpio)
-                    if os.path.exists(ruta_destino) and os.path.getsize(ruta_destino) > 0: continue 
+                    if os.path.exists(ruta_destino) and os.path.getsize(ruta_destino) > 0: continue
                     tareas_descarga.append((archivo_full, ruta_destino))
 
     try: ftps.quit()
     except: pass
-    
+
     total_archivos = len(tareas_descarga)
     if total_archivos == 0:
         log.info("✅ Todo actualizado.")
@@ -665,10 +693,10 @@ def proceso_descarga(config, es_reintento=False, stop_event=None):
     if stop_event and stop_event.is_set(): return
 
     resultados = descargar_archivos_paralelo(config, tareas_descarga, workers=DEFAULT_WORKERS, stop_event=stop_event)
-    
+
     errores = [r for r in resultados if r[1] is not None]
     exitos = len(resultados) - len(errores)
-    
+
     log.info(f"   ✅ Éxitos: {exitos}")
     if errores:
         log.error(f"   ❌ Errores: {len(errores)}")
@@ -724,12 +752,12 @@ def proceso_base_datos(config, es_reintento=False, stop_event=None):
         fecha_fin = datetime.strptime(config['fecha_fin'], "%Y-%m-%d")
     except: return False
     dias_permitidos, meses_permitidos = generar_fechas_permitidas(fecha_ini, fecha_fin)
-    
+
     log.info(f"🔌 Conectando a BD (Fast Mode): {ruta_db_completa}")
     conn = sqlite_fast_connect(ruta_db_completa)
     cursor = conn.cursor()
     archivos_procesados_cache = cargar_cache_archivos_existentes(cursor)
-    
+
     log.info(f"📂 Escaneando archivos locales...")
     patron = os.path.join(ruta_descargas, "**", "*.tx*")
     archivos = glob.glob(patron, recursive=True)
@@ -751,7 +779,7 @@ def proceso_base_datos(config, es_reintento=False, stop_event=None):
         if (nombre_archivo.lower(), anio_carpeta) in archivos_procesados_cache: continue
         es_valido = False
         carpeta_padre = os.path.basename(os.path.dirname(ruta_completa))
-        
+
         if nombre_tabla in ARCHIVOS_MENSUALES:
             if f"{anio_carpeta}-{fecha_identificador}" in meses_permitidos: es_valido = True
         else:
@@ -761,21 +789,21 @@ def proceso_base_datos(config, es_reintento=False, stop_event=None):
                  elif carpeta_padre == anio_carpeta and len(fecha_identificador) == 4:
                      mes = fecha_identificador[:2]
                      if f"{anio_carpeta}-{mes}" in meses_permitidos: es_valido = True
-                         
+
         if not es_valido: continue
 
         archivo_corrupto = False
         razon = ""
         size_bytes = os.path.getsize(ruta_completa)
         if size_bytes == 0: archivo_corrupto = True; razon = "0 bytes"
-        
+
         if archivo_corrupto:
             log.warning(f"🗑️ Corrupto ({razon}): {nombre_archivo} -> ELIMINADO")
             try: os.remove(ruta_completa)
             except: pass
             corruptos_eliminados += 1
             continue
-            
+
         try:
             meta = {
                 'origen_archivo': nombre_archivo,
@@ -785,14 +813,14 @@ def proceso_base_datos(config, es_reintento=False, stop_event=None):
                 'fecha_carga': str(pd.Timestamp.now())
             }
             rows = bulk_insert_fast(conn, ruta_completa, nombre_tabla, meta, chunksize=100000)
-            
+
             if rows > 0:
                 archivos_procesados_cache.add((nombre_archivo, anio_carpeta))
                 tablas_tocadas.add(nombre_tabla)
                 log.info(f"💾 Guardado ({rows} filas): {nombre_archivo}")
             else:
                 raise Exception("Archivo vacío o sin datos válidos")
-                
+
         except Exception as e:
             if "No columns to parse" in str(e) or "registros" in str(e).lower() or "vacío" in str(e).lower():
                 log.warning(f"🗑️ Archivo vacío detectado: {nombre_archivo}")
@@ -806,10 +834,10 @@ def proceso_base_datos(config, es_reintento=False, stop_event=None):
         log.info("🔨 Optimizando índices...")
         for t in tablas_tocadas:
             ensure_indexes(conn, t, ['anio', 'mes_dia', 'version_dato', 'origen_archivo'])
-            
+
     conn.close()
     log.info(f"✅ FASE {'2' if not es_reintento else 'RECUPERACIÓN'} TERMINADA.")
-    if corruptos_eliminados > 0: return True 
+    if corruptos_eliminados > 0: return True
     return False
 
 def calcular_peso_version(extension):
@@ -822,37 +850,37 @@ def calcular_peso_version(extension):
     if ext == 'txa': return 290
     match = re.search(r'tx(\d+)', ext)
     if match: return int(match.group(1)) * 100
-    return 0 
+    return 0
 
 def generar_reporte_logica(config, stop_event=None):
     log.info("🚀 INICIANDO GENERADOR HORIZONTAL XM (OPTIMIZADO)")
     ruta_local = config['ruta_local']
     ruta_db_completa = os.path.join(ruta_local, NOMBRE_DB_FILE)
     ruta_reporte_completa = os.path.join(ruta_local, NOMBRE_REPORTE_FILE)
-    
+
     try:
         fecha_ini_str = config['fecha_ini']
         fecha_fin_str = config['fecha_fin']
         datetime.strptime(fecha_ini_str, "%Y-%m-%d")
         datetime.strptime(fecha_fin_str, "%Y-%m-%d")
-    except: 
+    except:
         log.error("Fechas inválidas")
         return
 
     tareas_a_procesar = config['filtros_reporte']
-    
+
     if not os.path.exists(ruta_db_completa):
         log.error(f"❌ No existe la BD en: {ruta_db_completa}")
         return
 
     conn = sqlite3.connect(ruta_db_completa)
     cursor = conn.cursor()
-    
+
     try:
         with pd.ExcelWriter(ruta_reporte_completa, engine='openpyxl') as writer:
-            columna_actual = 0  
+            columna_actual = 0
             tablas_escritas = 0
-            
+
             for tarea in tareas_a_procesar:
                 if stop_event and stop_event.is_set(): break
 
@@ -868,13 +896,13 @@ def generar_reporte_logica(config, stop_event=None):
 
                 es_mensual = any(tabla.upper().startswith(x.upper()) for x in ARCHIVOS_MENSUALES)
                 where_clauses = ["1=1"]
-                
+
                 if col_filtro and val_filtro:
                     where_clauses.append(f"CAST(\"{col_filtro}\" AS TEXT) = '{val_filtro}'")
 
                 if ver_filtro and ver_filtro != "Última":
-                    where_clauses.append(f"\"version_dato\" = '{ver_filtro}'")
-                
+                    where_clauses.append(f"lower(\"version_dato\") = lower('{ver_filtro}')")
+
                 if es_mensual:
                     sql_date = f"CAST(anio AS TEXT) || '-' || printf('%02d', CAST(mes_dia AS INTEGER)) || '-01'"
                 else:
@@ -884,11 +912,11 @@ def generar_reporte_logica(config, stop_event=None):
                 where_clauses.append(f"date({sql_date}) BETWEEN date('{fecha_ini_str}') AND date('{fecha_fin_str}')")
 
                 query = f'SELECT * FROM "{nombre_real_table}" WHERE {" AND ".join(where_clauses)}'
-                
+
                 try:
                     df = pd.read_sql_query(query, conn)
                     if df.empty: continue
-                    df = df.copy() 
+                    df = df.copy()
 
                     cols_no_num = ['index', 'anio', 'mes_dia', 'version_dato', 'origen_archivo', 'fecha_carga']
                     for col in df.columns:
@@ -898,21 +926,21 @@ def generar_reporte_logica(config, stop_event=None):
                                 if nums.notna().any():
                                     df[col] = nums.fillna(df[col])
                             except: pass
-                    
+
                     if es_mensual:
                          df['Fecha'] = pd.to_datetime(
-                             df['anio'].astype(str) + '-' + 
+                             df['anio'].astype(str) + '-' +
                              df['mes_dia'].astype(str).str.zfill(2) + '-01'
                          )
                     else:
                          md_str = df['mes_dia'].astype(str).str.zfill(4)
                          df['Fecha'] = pd.to_datetime(
-                             df['anio'].astype(str) + '-' + 
-                             md_str.str.slice(0, 2) + '-' + 
+                             df['anio'].astype(str) + '-' +
+                             md_str.str.slice(0, 2) + '-' +
                              md_str.str.slice(2, 4),
                              errors='coerce'
                          )
-                    
+
                     df = df.dropna(subset=['Fecha'])
 
                     if not ver_filtro or ver_filtro == "Última":
@@ -923,7 +951,7 @@ def generar_reporte_logica(config, stop_event=None):
 
                     cols_borrar = ['anio', 'mes_dia', 'origen_archivo', 'fecha_carga', 'index']
                     df = df.drop(columns=[c for c in cols_borrar if c in df.columns], errors='ignore')
-                    
+
                     cols = ['Fecha'] + [c for c in df.columns if c != 'Fecha']
                     df = df[cols]
                     df['Fecha'] = df['Fecha'].dt.date
@@ -931,17 +959,21 @@ def generar_reporte_logica(config, stop_event=None):
                     titulo = f"{tabla.upper()} {val_filtro if val_filtro else ''}"
                     pd.DataFrame({titulo: []}).to_excel(writer, sheet_name="Datos", startrow=0, startcol=columna_actual, index=False)
                     df.to_excel(writer, sheet_name="Datos", startrow=1, startcol=columna_actual, index=False)
-                    columna_actual += len(df.columns) + 1 
+                    columna_actual += len(df.columns) + 1
                     tablas_escritas += 1
-                    
+
                     print(f"   ✅ Exportado: {tabla}")
 
                 except Exception as e:
                     log.error(f"Error procesando tabla {tabla}: {e}")
 
+            if tablas_escritas == 0:
+                pd.DataFrame({'Info': ['No se encontraron datos para los filtros seleccionados.']}).to_excel(writer, sheet_name="Sin Datos", index=False)
+                log.warning("⚠️ No se encontraron datos. Generando hoja informativa 'Sin Datos'.")
+
         if tablas_escritas > 0: log.info(f"✅ REPORTE LISTO: {ruta_reporte_completa}")
         else: log.warning("⚠️ Reporte vacío (verifique filtros o descargas).")
-            
+
     except Exception as e:
         log.error(f"❌ Error fatal en reporte: {e}")
     finally:
@@ -953,10 +985,10 @@ def generar_reporte_logica(config, stop_event=None):
 
 class ModuloVisualizador:
     def __init__(self, parent_frame, config):
-        self.frame_main = parent_frame 
+        self.frame_main = parent_frame
         self.ruta_db = config.get('ruta_db_viz', "BaseDatosXM.db")
-        self.datos_actuales = None 
-        
+        self.datos_actuales = None
+
         self.var_tabla = tk.StringVar(); self.var_version = tk.StringVar()
         self.var_campo_filtro1 = tk.StringVar(); self.var_valor_filtro1 = tk.StringVar()
         self.var_campo_filtro2 = tk.StringVar(); self.var_valor_filtro2 = tk.StringVar()
@@ -980,7 +1012,7 @@ class ModuloVisualizador:
 
         col1 = ttk.Labelframe(frame_controls, text="1. Fuente de Datos", padding=10)
         col1.pack(side="left", fill="both", expand=True, padx=5)
-        
+
         ttk.Label(col1, text="Archivo:").grid(row=0, column=0, sticky="w", pady=2, padx=5)
         self.cb_tabla = ttk.Combobox(col1, textvariable=self.var_tabla, state="readonly", width=18)
         self.cb_tabla.grid(row=0, column=1, padx=2); self.cb_tabla.bind("<<ComboboxSelected>>", self.al_seleccionar_tabla)
@@ -1044,35 +1076,35 @@ class ModuloVisualizador:
         def toggle_dia_unico():
             if self.var_dia_unico.get():
                 _sync_fechas()
-                self.frame_nav_fin.grid_remove() 
+                self.frame_nav_fin.grid_remove()
                 self.lbl_fin.grid_remove()
             else:
                 self.frame_nav_fin.grid()
                 self.lbl_fin.grid()
-                
+
         def mover_fecha(var_fecha, dias):
             try:
                 dt = datetime.strptime(var_fecha.get(), "%Y-%m-%d")
                 curr = dt + timedelta(days=dias)
                 nue_fecha = curr.strftime("%Y-%m-%d")
-                var_fecha.set(nue_fecha) 
+                var_fecha.set(nue_fecha)
                 self.generar_grafico()
             except: pass
 
         def crear_navegador_fecha(parent, var_fecha, row_idx):
             f_nav = ttk.Frame(parent)
             f_nav.grid(row=row_idx, column=1, padx=2, sticky="w")
-            
-            ttk.Button(f_nav, text="<", width=2, bootstyle="outline", 
+
+            ttk.Button(f_nav, text="<", width=2, bootstyle="outline",
                                  command=lambda: mover_fecha(var_fecha, -1)).pack(side="left", padx=1)
-            
+
             e = ttk.Entry(f_nav, textvariable=var_fecha, width=12)
             e.pack(side="left", padx=2)
             e.bind("<FocusOut>", self.actualizar_versiones)
-            
-            ttk.Button(f_nav, text=">", width=2, bootstyle="outline", 
+
+            ttk.Button(f_nav, text=">", width=2, bootstyle="outline",
                                  command=lambda: mover_fecha(var_fecha, 1)).pack(side="left", padx=1)
-            
+
             ttk.Button(f_nav, text="📅", bootstyle="link",
                       command=lambda: CalendarDialog(self.frame_main, lambda d: [var_fecha.set(d), self.generar_grafico()])).pack(side="left", padx=2)
             return e, f_nav
@@ -1085,10 +1117,10 @@ class ModuloVisualizador:
         self.lbl_fin.grid(row=1, column=0, sticky="w", pady=1, padx=5)
         self.ent_fecha_fin, self.frame_nav_fin = crear_navegador_fecha(col3, self.var_fecha_fin, 1)
         self.var_fecha_fin.set(config.get('viz_fecha_fin', datetime.today().strftime('%Y-%m-%d')))
-        
+
         fr_toggle = ttk.Frame(col3)
         fr_toggle.grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=5)
-        
+
         ttk.Checkbutton(fr_toggle, text="Solo un día", variable=self.var_dia_unico, command=toggle_dia_unico, bootstyle="round-toggle").pack(side="left")
 
         ttk.Button(col3, text="📊 GRAFICAR", command=self.generar_grafico, bootstyle="primary").grid(row=3, column=0, pady=8, sticky="ew", padx=2)
@@ -1109,7 +1141,7 @@ class ModuloVisualizador:
         self.frame_plot.config(height=400)
         self.frame_plot.pack_propagate(False)
         self.frame_plot.pack(fill="both", expand=True, padx=10, pady=5)
-        
+
         if os.path.exists(self.ruta_db): self.cargar_tablas()
 
     def toggle_campo_valor(self, event=None):
@@ -1163,7 +1195,7 @@ class ModuloVisualizador:
             if 'version_dato' not in cols:
                 self.cb_version['values'] = []; self.cb_version.set("N/A")
                 conn.close(); return
-            
+
             f_ini_str = self.var_fecha_ini.get().replace("-", "")
             f_fin_str = self.var_fecha_fin.get().replace("-", "")
             es_mensual_var = any(tabla.lower().startswith(x.lower()) for x in ARCHIVOS_MENSUALES)
@@ -1180,7 +1212,7 @@ class ModuloVisualizador:
             if lista_versiones: lista_versiones.insert(0, "Última")
             self.cb_version['values'] = lista_versiones
             if lista_versiones: self.cb_version.current(0)
-            
+
         except Exception as e: print(f"Error actualizando versiones: {e}")
         finally: conn.close()
 
@@ -1207,7 +1239,7 @@ class ModuloVisualizador:
         campo2 = self.var_campo_filtro2.get(); valor2 = self.var_valor_filtro2.get()
         operacion = self.var_agregacion.get(); temporalidad = self.var_temporalidad.get()
         f_ini_str = self.var_fecha_ini.get(); f_fin_str = self.var_fecha_fin.get()
-        
+
         tipo_grafico = self.var_tipo_grafico.get()
         nombre_color = self.var_color_grafico.get()
         color_hex = COLORES_GRAFICO.get(nombre_color, "#27ae60")
@@ -1218,38 +1250,38 @@ class ModuloVisualizador:
             conn = self.conectar()
             where = ["1=1"]
             params = []
-            
+
             if campo1 and valor1:
                 where.append(f"CAST({campo1} AS TEXT) = ?")
                 params.append(str(valor1))
             if campo2 and valor2:
                 where.append(f"CAST({campo2} AS TEXT) = ?")
                 params.append(str(valor2))
-            
+
             if version and version not in ["N/A", "Última"]:
-                where.append("version_dato = ?")
+                where.append("lower(version_dato) = lower(?)")
                 params.append(str(version))
-            
+
             es_mensual_graf = any(tabla.lower().startswith(x.lower()) for x in ARCHIVOS_MENSUALES)
             if es_mensual_graf:
                 sql_date = f"CAST(anio AS TEXT) || '-' || printf('%02d', CAST(mes_dia AS INTEGER)) || '-01'"
             else:
                 col_md = "printf('%04d', CAST(mes_dia AS INTEGER))"
                 sql_date = f"CAST(anio AS TEXT) || '-' || substr({col_md}, 1, 2) || '-' || substr({col_md}, 3, 2)"
-            
+
             where.append(f"date({sql_date}) BETWEEN date(?) AND date(?)")
             params.append(f_ini_str)
             params.append(f_fin_str)
-            
+
             query = f"SELECT * FROM {tabla} WHERE {' AND '.join(where)}"
-            
+
             df = pd.read_sql_query(query, conn, params=params); conn.close()
             if df.empty: messagebox.showinfo("Vacío", f"No hay datos para graficar."); return
 
             try:
                 df['anio'] = pd.to_numeric(df['anio'], errors='coerce').fillna(0).astype(int)
                 df['mes_dia'] = pd.to_numeric(df['mes_dia'], errors='coerce').fillna(0).astype(int)
-                
+
                 if es_mensual_graf:
                     df['day'] = 1
                     df['month'] = df['mes_dia']
@@ -1289,13 +1321,13 @@ class ModuloVisualizador:
             if temporalidad == "Horaria (24h)":
                 cols_range_0 = [str(i) for i in range(24)]
                 cols_range_1 = [str(i) for i in range(1, 25)]
-                
+
                 has_24 = '24' in df.columns
                 has_0 = '0' in df.columns
-                
+
                 cols_horas = []
                 es_base_0 = True
-                
+
                 if has_24:
                     cols_horas = [c for c in df.columns if c in cols_range_1]
                     es_base_0 = False
@@ -1309,14 +1341,14 @@ class ModuloVisualizador:
                         cols_horas = matches_1; es_base_0 = False
                     else:
                         cols_horas = matches_0; es_base_0 = True
-                
+
                 if not cols_horas: cols_horas = [c for c in df.columns if 'hora' in c.lower()]
                 for c in cols_horas: df[c] = pd.to_numeric(df[c], errors='coerce')
-                
+
                 if operacion == "Valor":
                     df_melted = df.melt(id_vars=['Fecha'], value_vars=cols_horas, var_name='HoraStr', value_name='Res')
                     df_melted['Hora'] = pd.to_numeric(
-                        df_melted['HoraStr'].astype(str).str.extract(r'(\d+)')[0], 
+                        df_melted['HoraStr'].astype(str).str.extract(r'(\d+)')[0],
                         errors='coerce'
                     ).fillna(0).astype(int)
                     if not es_base_0: df_melted['Hora'] = df_melted['Hora'] - 1
@@ -1336,10 +1368,10 @@ class ModuloVisualizador:
                         if c.lower() not in excl and pd.to_numeric(df[c], errors='coerce').notna().any():
                             col_val = c; self.var_campo_valor.set(col_val); break
                     if not col_val: messagebox.showwarning("Info", "Selecciona variable."); return
-                
+
                 df[col_val] = pd.to_numeric(df[col_val], errors='coerce')
                 if temporalidad == "Mensual": df['Fecha'] = df['Fecha'].apply(lambda x: x.replace(day=1))
-                
+
                 grupo = df.groupby('Fecha')[col_val]
                 if operacion == "Promedio": serie_graficar = grupo.mean()
                 elif operacion == "Suma": serie_graficar = grupo.sum()
@@ -1354,7 +1386,7 @@ class ModuloVisualizador:
                 if valor2: partes.append(valor2)
                 self.var_actual_excel = " - ".join(partes) if partes else "Promedio 24h"
             else: self.var_actual_excel = self.var_campo_valor.get()
-            
+
             val_prom = self.datos_actuales.mean(); val_max = self.datos_actuales.max()
             val_min = self.datos_actuales.min(); val_sum = self.datos_actuales.sum()
             self.lbl_stat_prom.config(text=f"Promedio: {val_prom:,.2f}")
@@ -1365,10 +1397,10 @@ class ModuloVisualizador:
             titulo_grafico = f"{tabla.upper()}"
             if valor1: titulo_grafico += f"\n{valor1}"
             if valor2: titulo_grafico += f" - {valor2}"
-            
+
             if temporalidad == "Horaria (24h)" and f_ini_str == f_fin_str:
                 titulo_grafico += f"\n[{f_ini_str}]"
-                
+
             if operacion != "Valor":
                 titulo_grafico += f" ({operacion})"
             self.titulo_actual = titulo_grafico.replace("\n", " ")
@@ -1384,7 +1416,7 @@ class ModuloVisualizador:
             df_export = self.datos_actuales.reset_index(); df_export.columns = ['Fecha', 'Valor']
             nombre_var = getattr(self, 'var_actual_excel', 'Desconocido')
             df_export.insert(1, 'Variable', nombre_var)
-            df_export['Fecha'] = df_export['Fecha'].dt.date 
+            df_export['Fecha'] = df_export['Fecha'].dt.date
             with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
                 df_export.to_excel(writer, index=False, sheet_name="Datos Gráfico")
             messagebox.showinfo("Éxito", f"Datos exportados a:\n{file_path}")
@@ -1392,16 +1424,16 @@ class ModuloVisualizador:
 
     def dibujar_plot(self, serie, titulo, tipo, color, temporalidad="Diaria"):
         for widget in self.frame_plot.winfo_children(): widget.destroy()
-        
+
         # Ajustamos colores de fondo a transparente para que tome el tema
         fig = Figure(figsize=(8, 4.1), dpi=100) # Sin facecolor hardcoded
         ax = fig.add_subplot(111)
-        
+
         # Tema claro por defecto en matplotlib, intentar ajustar
         ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
         ax.grid(True, axis='y', linestyle=':', linewidth=1.5, alpha=0.5)
         ax.set_axisbelow(True)
-        
+
         if tipo == "Línea":
             ax.plot(serie.index, serie.values, marker='o', linestyle='-', markersize=5, color=color, linewidth=2, zorder=3)
             ax.fill_between(serie.index, serie.values, color=color, alpha=0.1, zorder=2)
@@ -1413,17 +1445,18 @@ class ModuloVisualizador:
             ax.plot(serie.index, serie.values, color=color, linewidth=2, zorder=4)
         elif tipo == "Dispersión":
             ax.scatter(serie.index, serie.values, color=color, s=40, alpha=0.8, zorder=3)
-        
-        line_ghost, = ax.plot(serie.index, serie.values, color=color, alpha=0.0) 
+
+        line_ghost, = ax.plot(serie.index, serie.values, color=color, alpha=0.0)
+
         try: init_x = serie.index[0]
         except: init_x = 0
         cursor_line = ax.axvline(x=init_x, color='#7f8c8d', linestyle='--', linewidth=1, alpha=0.6, zorder=0)
         cursor_line.set_visible(False)
 
         ax.set_title(titulo, fontsize=12, weight='bold', pad=15)
-        
+
         tooltip_fmt = "%Y-%m-%d"
-        
+
         if temporalidad == "Mensual":
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
             ax.xaxis.set_major_locator(mdates.MonthLocator())
@@ -1449,8 +1482,8 @@ class ModuloVisualizador:
             ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
             if len(serie) > 30: fig.autofmt_xdate(rotation=45)
             tooltip_fmt = "%Y-%m-%d"
-        
-        ax.yaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f}')) 
+
+        ax.yaxis.set_major_formatter(ticker.StrMethodFormatter('{x:,.0f}'))
 
         annot = ax.annotate("", xy=(0,0), xytext=(10,10),textcoords="offset points",
                             bbox=dict(boxstyle="round4,pad=0.5", fc="#ffffff", ec="#bdc3c7", alpha=0.95, lw=1),
@@ -1472,7 +1505,7 @@ class ModuloVisualizador:
             if fecha_dt is not None:
                 try: f_str = fecha_dt.strftime(tooltip_fmt)
                 except: pass
-                
+
             annot.set_text(f"{f_str}\n{y[idx]:,.2f}")
 
         def hover(event):
@@ -1481,7 +1514,7 @@ class ModuloVisualizador:
                 cursor_line.set_xdata([event.xdata, event.xdata])
                 if not vis_line: cursor_line.set_visible(True)
                 cont, ind = line_ghost.contains(event)
-                if cont: 
+                if cont:
                     update_annot(ind); annot.set_visible(True); fig.canvas.draw_idle()
                 elif vis: annot.set_visible(False); fig.canvas.draw_idle()
                 else: fig.canvas.draw_idle()
@@ -1491,7 +1524,7 @@ class ModuloVisualizador:
         fig.canvas.mpl_connect("motion_notify_event", hover)
         try: fig.tight_layout(rect=[0, 0.05, 1, 0.95], pad=1.5)
         except: pass
-        
+
         canvas = FigureCanvasTkAgg(fig, master=self.frame_plot)
         canvas.draw()
         toolbar = NavigationToolbar2Tk(canvas, self.frame_plot); toolbar.update()
@@ -1511,6 +1544,9 @@ class AplicacionXM:
         x_pos = (screen_width - w_app) // 2; y_pos = (screen_height - h_app) // 2
         self.root.geometry(f"{w_app}x{h_app}+{x_pos}+{y_pos}")
 
+        # Aplicar estilos iniciales
+        self.aplicar_estilos_treeview()
+
         # Configurar icono de ventana
         try:
             ruta_icono = os.path.join(os.path.dirname(os.path.abspath(__file__)), ICON_WINDOW_FILENAME)
@@ -1518,19 +1554,19 @@ class AplicacionXM:
                 img_icon = tk.PhotoImage(file=ruta_icono)
                 self.root.iconphoto(False, img_icon)
         except Exception: pass
-        
+
         self.config = self.cargar_config()
         self.stop_event = threading.Event()
-        
+
         self.construir_encabezado_logo()
 
         console_container = ttk.Frame(root)
         console_container.pack(side="bottom", fill="x", expand=False, padx=10, pady=5)
-        
+
         # Log console estilizado
         self.txt_console = ScrolledText(console_container, height=6, state='disabled', bootstyle="success-round", font=('Consolas', 10))
         self.txt_console.pack(fill="x", expand=False, padx=0, pady=0)
-        
+
         # Redirigir stdout
         sys.stdout = PrintRedirector(self.txt_console.text) # ScrolledText tiene .text como widget interno
 
@@ -1540,7 +1576,7 @@ class AplicacionXM:
         self.tab_archivos = ttk.Frame(tab_control, padding=10)
         self.tab_filtros = ttk.Frame(tab_control, padding=10)
         self.tab_visualizador = ttk.Frame(tab_control, padding=10)
-        
+
         tab_control.add(self.tab_general, text='🔧 Configuración')
         tab_control.add(self.tab_archivos, text='📥 Descargas')
         tab_control.add(self.tab_filtros, text='📋 Filtros Reporte')
@@ -1563,6 +1599,24 @@ class AplicacionXM:
         ch.setLevel(logging.INFO)
         logger.addHandler(ch)
 
+    def aplicar_estilos_treeview(self):
+        """Aplica configuraciones visuales específicas para el Treeview"""
+        try:
+            # Usar self.root.style si está disponible, o ttk.Style()
+            style = getattr(self.root, 'style', ttk.Style())
+            
+            # Configuraciones base
+            # Aumentamos rowheight a 40 para evitar solapamiento
+            style.configure("Treeview", rowheight=35, font=("Segoe UI", 11))
+            style.configure("Treeview.Heading", font=("Segoe UI", 11, "bold"))
+            
+            # Aplicar a variantes de color de ttkbootstrap (importante: usar minúsculas para los colores)
+            for color in ['info', 'primary', 'success', 'warning', 'danger', 'secondary', 'light', 'dark']:
+                style.configure(f"{color}.Treeview", rowheight=35, font=("Segoe UI", 11))
+                style.configure(f"{color}.Treeview.Heading", font=("Segoe UI", 11, "bold"))
+        except Exception as e:
+            print(f"Advertencia configurando estilos Treeview: {e}")
+
     def toggle_controls(self, state='normal'):
         try:
             self.btn_guardar.config(state=state); self.btn_descargar.config(state=state); self.btn_reporte.config(state=state)
@@ -1579,18 +1633,18 @@ class AplicacionXM:
     def construir_encabezado_logo(self):
         frame_header = ttk.Frame(self.root, padding=10, bootstyle="light")
         frame_header.pack(fill="x", side="top")
-        
+
         # Contenedor para Logo + Titulo + Selector Tema
         frame_content = ttk.Frame(frame_header)
         frame_content.pack(fill="x")
-        
+
         script_dir = os.path.dirname(os.path.abspath(__file__))
         ruta_logo = os.path.join(script_dir, LOGO_FILENAME)
-        
+
         if TIENE_PILLOW and os.path.exists(ruta_logo):
             try:
                 pil_img = Image.open(ruta_logo)
-                base_height = 40 
+                base_height = 40
                 w_percent = (base_height / float(pil_img.size[1]))
                 w_size = int((float(pil_img.size[0]) * float(w_percent)))
                 pil_img = pil_img.resize((w_size, base_height), RESAMPLE_LANCZOS)
@@ -1598,10 +1652,10 @@ class AplicacionXM:
                 lbl_logo = ttk.Label(frame_content, image=self.logo_img)
                 lbl_logo.pack(side="left", padx=10)
             except: pass
-        
+
         lbl_title = ttk.Label(frame_content, text="Suite Inteligente XM", font=("Segoe UI", 16, "bold"), bootstyle="primary")
         lbl_title.pack(side="left", padx=10)
-        
+
         # Selector de Tema
         frame_theme = ttk.Frame(frame_content)
         frame_theme.pack(side="right")
@@ -1614,11 +1668,13 @@ class AplicacionXM:
     def cambiar_tema(self, event):
         t = self.cb_theme.get()
         self.root.style.theme_use(t)
+        # Re-aplicar estilos personalizados porque el cambio de tema puede resetearlos
+        self.aplicar_estilos_treeview()
 
     def crear_tab_general(self):
         main_container = ttk.Frame(self.tab_general)
         main_container.pack(fill="both", expand=True, padx=20, pady=10)
-        
+
         card_main = Card(main_container, title="Credenciales y Rutas", icon="⚙️")
         card_main.pack(fill="x", pady=(0, 10))
         c_content = card_main.get_body()
@@ -1636,7 +1692,7 @@ class AplicacionXM:
 
         ttk.Label(c_content, text="Ruta Local").grid(row=2, column=0, sticky="w", pady=(2, 2), padx=(0, 10))
         fr_ruta = ttk.Frame(c_content)
-        fr_ruta.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10)) 
+        fr_ruta.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         self.ent_ruta = ttk.Entry(fr_ruta)
         self.ent_ruta.pack(side="left", fill="x", expand=True)
         self.ent_ruta.insert(0, self.config.get('ruta_local', ''))
@@ -1644,7 +1700,7 @@ class AplicacionXM:
         self.btn_fold.pack(side="left", padx=(5, 0))
 
         ttk.Separator(c_content, orient="horizontal").grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 10))
-        
+
         ttk.Label(c_content, text="Fecha Inicio").grid(row=5, column=0, sticky="w", pady=(2, 2), padx=(0, 10))
         f_ini = ttk.Frame(c_content)
         f_ini.grid(row=6, column=0, sticky="ew", padx=(0, 20))
@@ -1653,7 +1709,7 @@ class AplicacionXM:
         ttk.Button(f_ini, text="📅", bootstyle="link",
                   command=lambda: CalendarDialog(self.root, lambda d: [self.ent_ini.delete(0, tk.END), self.ent_ini.insert(0, d)])).pack(side="left")
         self.ent_ini.insert(0, self.config.get('fecha_ini', '2025-01-01'))
-        
+
         ttk.Label(c_content, text="Fecha Fin").grid(row=5, column=1, sticky="w", pady=(2, 2), padx=(0, 10))
         f_fin = ttk.Frame(c_content)
         f_fin.grid(row=6, column=1, sticky="ew")
@@ -1665,7 +1721,7 @@ class AplicacionXM:
 
         row_actions = ttk.Frame(main_container)
         row_actions.pack(pady=(10, 10))
-        
+
         self.btn_guardar = ttk.Button(row_actions, text=" GUARDAR CONFIG", bootstyle="success", command=self.guardar_config, width=20)
         self.btn_guardar.grid(row=0, column=0, padx=5)
         self.btn_descargar = ttk.Button(row_actions, text=" EJECUTAR DESCARGA", bootstyle="primary", command=self.run_descarga, width=20)
@@ -1690,28 +1746,28 @@ class AplicacionXM:
 
         ttk.Label(c1, text="Nombre Archivo (Base)").grid(row=0, column=0, sticky="w", pady=(0, 5), padx=5)
         self.ent_f_nom = ttk.Entry(c1); self.ent_f_nom.grid(row=1, column=0, sticky="ew", padx=5, pady=(0, 2))
-        
+
         ttk.Label(c1, text="Ruta FTP").grid(row=0, column=1, sticky="w", pady=(0, 5), padx=5)
         self.ent_f_rut = ttk.Entry(c1); self.ent_f_rut.grid(row=1, column=1, sticky="ew", padx=5, pady=(0, 2))
-        
+
         self.btn_add_file = ttk.Button(c1, text="✚", command=self.add_file, bootstyle="success")
         self.btn_add_file.grid(row=1, column=2, padx=5)
 
         card_list = Card(main_container, title="Archivos Configurados")
         card_list.pack(fill="both", expand=True, pady=(0, 10))
         c2 = card_list.get_body()
-        
+
         self.tree_files = ttk.Treeview(c2, columns=("nombre", "ruta", "acciones"), show="headings", height=8, bootstyle="info")
         self.tree_files.heading("nombre", text="Nombre Archivo", anchor="w")
         self.tree_files.heading("ruta", text="Ruta FTP", anchor="w")
-        self.tree_files.heading("acciones", text="Acciones", anchor="center") 
+        self.tree_files.heading("acciones", text="Acciones", anchor="center")
         self.tree_files.column("nombre", width=150); self.tree_files.column("ruta", width=400, stretch=True); self.tree_files.column("acciones", width=80, anchor="center")
-        
+
         scrollbar = ttk.Scrollbar(c2, orient="vertical", command=self.tree_files.yview)
         scrollbar.pack(side="right", fill="y")
         self.tree_files.configure(yscrollcommand=scrollbar.set)
         self.tree_files.pack(side="left", fill="both", expand=True)
-        
+
         for idx, i in enumerate(self.config.get('archivos_descarga', [])):
             self.tree_files.insert("", "end", values=(i['nombre_base'], i['ruta_remota'], "🗑️"))
 
@@ -1743,7 +1799,7 @@ class AplicacionXM:
         self.cb_r_ver.bind("<<ComboboxSelected>>", self.actualizar_todas_versiones_filtro)
 
         fr_btns = ttk.Frame(c1); fr_btns.grid(row=1, column=4, padx=5)
-        
+
         ttk.Button(fr_btns, text="✚", bootstyle="success", width=4, command=self.add_filtro).pack(side="left", padx=2)
         ttk.Button(fr_btns, text="▲", bootstyle="secondary-outline", width=4, command=self.move_up).pack(side="left", padx=2)
         ttk.Button(fr_btns, text="▼", bootstyle="secondary-outline", width=4, command=self.move_down).pack(side="left", padx=2)
@@ -1753,7 +1809,7 @@ class AplicacionXM:
         card_list = Card(fr_card_list, title="Lista de Reportes")
         card_list.pack(fill="both", expand=True)
         c2 = card_list.get_body()
-        
+
         self.tree_filtros = ttk.Treeview(c2, columns=("tabla", "campo", "valor", "version", "acciones"), show="headings", height=8, bootstyle="info")
         self.tree_filtros.heading("tabla", text="Tabla", anchor="w"); self.tree_filtros.heading("campo", text="Campo", anchor="w")
         self.tree_filtros.heading("valor", text="Valor", anchor="w"); self.tree_filtros.heading("version", text="Versión", anchor="center")
@@ -1761,11 +1817,11 @@ class AplicacionXM:
         self.tree_filtros.column("tabla", width=120); self.tree_filtros.column("campo", width=150)
         self.tree_filtros.column("valor", width=200, stretch=True); self.tree_filtros.column("version", width=100, anchor="center")
         self.tree_filtros.column("acciones", width=80, anchor="center")
-        
+
         scrollbar = ttk.Scrollbar(c2, orient="vertical", command=self.tree_filtros.yview)
         scrollbar.pack(side="right", fill="y"); self.tree_filtros.configure(yscrollcommand=scrollbar.set)
         self.tree_filtros.pack(side="left", fill="both", expand=True)
-        
+
         for idx, i in enumerate(self.config.get('filtros_reporte', [])):
             self.tree_filtros.insert("", "end", values=(i['tabla'], i.get('campo',''), i.get('valor',''), i.get('version',''), "🗑️"))
         self.tree_filtros.bind("<Button-1>", lambda e: self.del_filtro() if self.tree_filtros.identify_column(e.x) == "#5" else None)
@@ -1787,7 +1843,7 @@ class AplicacionXM:
     def seleccionar_carpeta(self):
         d = filedialog.askdirectory()
         if d: self.ent_ruta.delete(0, tk.END); self.ent_ruta.insert(0, d)
-    
+
     def add_file(self):
         nom, rut = self.ent_f_nom.get(), self.ent_f_rut.get()
         if nom and rut:
@@ -1839,7 +1895,7 @@ class AplicacionXM:
         card = ttk.Frame(parent, bootstyle=bootstyle, padding=2)
         inner = ttk.Frame(card, style="Card.TFrame", padding=15)
         inner.pack(fill="both", expand=True)
-        
+
         ttk.Label(inner, text=icon, font=("Segoe UI", 24)).pack(side="left", padx=(0, 15))
         text_frame = ttk.Frame(inner)
         text_frame.pack(side="left", fill="both", expand=True)
@@ -1854,11 +1910,11 @@ class AplicacionXM:
         n_filters = len(self.tree_filtros.get_children()) if hasattr(self, 'tree_filtros') else 0
         db_exists = os.path.exists(db_path)
         db_size = f"{os.path.getsize(db_path)/(1024*1024):.2f} MB" if db_exists else "0 MB"
-        
+
         grid_container = ttk.Frame(self.frame_dashboard)
         grid_container.pack(fill="both", expand=True, padx=20, pady=5)
         for i in range(3): grid_container.columnconfigure(i, weight=1, uniform="metric")
-        
+
         self.crear_metric_card(grid_container, "💾", db_size, "Base de Datos", "info" if db_exists else "danger").grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
         self.crear_metric_card(grid_container, "📥", n_files, "Archivos", "success").grid(row=0, column=1, padx=10, pady=10, sticky="nsew")
         self.crear_metric_card(grid_container, "📋", n_filters, "Filtros", "warning").grid(row=0, column=2, padx=10, pady=10, sticky="nsew")
@@ -1878,7 +1934,7 @@ class AplicacionXM:
         if not self.validar_config(): return
         self.stop_event.clear(); self.toggle_controls('disabled')
         threading.Thread(target=self._exec_descarga, args=(self.get_config(),)).start()
-    
+
     def _exec_descarga(self, cfg):
         try:
             proceso_descarga(cfg, stop_event=self.stop_event)
@@ -1905,6 +1961,6 @@ class AplicacionXM:
 
 if __name__ == "__main__":
     # Usamos ttkbootstrap Window en lugar de tk.Tk
-    app_window = ttk.Window(themename="minty") 
+    app_window = ttk.Window(themename="minty")
     app = AplicacionXM(app_window)
     app_window.mainloop()
